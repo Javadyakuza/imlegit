@@ -4,7 +4,7 @@ Run **Claude Code on an always-on server** (your subscription lives there) while
 
 ## Install: two commands, paired by a token
 
-**1. On the server** (Claude Code installed and `/login` done):
+**1. On the server** (the script offers to install Claude Code there if missing; you then run `claude` once and `/login`):
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Javadyakuza/claude-mac-bridge/main/install.sh)
 ```

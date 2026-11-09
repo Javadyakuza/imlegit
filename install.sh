@@ -50,6 +50,16 @@ server() {
   echo "server: ${avail}MB RAM free, ${disk}MB disk free"
   [ "$avail" -ge 150 ] || die "under 150MB RAM available; refusing"
   [ "$disk" -ge 50 ] || die "under 50MB disk; refusing"
+  if ! command -v claude >/dev/null 2>&1 && [ ! -x ~/.local/bin/claude ]; then
+    a=""; echo "Claude Code is not installed on this server."
+    [ -r /dev/tty ] && ask "Install it now with the official installer? [Y/n]: " a
+    case "${a:-Y}" in
+      [Nn]*) echo "Skipped. Install it yourself, then run: claude  (and /login)";;
+      *) [ "$avail" -ge 600 ] || echo "WARNING: only ${avail}MB RAM free. Claude sessions here can push this server into swap/OOM; consider a bigger box for prod."
+         curl -fsSL https://claude.ai/install.sh | bash || echo "Install failed; install Claude Code manually.";;
+    esac
+    echo ">>> After pairing, run 'claude' once on this server and /login with your subscription."
+  fi
   if command -v ss >/dev/null && ! ssh -o BatchMode=yes -o ConnectTimeout=3 mac true 2>/dev/null; then
     ss -ltn | grep -E ":($TP|$CDP)\b" && die "tunnel port busy"
   fi
