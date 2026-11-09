@@ -1,108 +1,80 @@
 #!/usr/bin/env bash
-# claude-mac-bridge: let Claude Code on a SERVER treat this Mac as its machine.
-# Run on the Mac:  ./install.sh user@server [-p 2222] [--mount]   |   ./install.sh --uninstall user@server
-# Needs: macOS Remote Login on (System Settings > General > Sharing). No root on the server.
+# claude-mac-bridge: Claude Code on a SERVER, your Mac as its remote machine.
+#   1) on the server:  bash install.sh        -> prints a pairing token
+#   2) on the Mac:     bash install.sh        -> paste the token
+# Extra: history MACPATH SRVPATH | mount | remove | help.  No root needed anywhere.
 set -euo pipefail
 
-HELP=0; PORT=2222; MOUNT=0; UNINSTALL=0; SRV=""; HISTORY=""
-while [ $# -gt 0 ]; do
-  case $1 in
-    -h|--help) HELP=1;; -p) PORT=$2; shift;; --mount) MOUNT=1;; --uninstall) UNINSTALL=1;; --history) HISTORY=$2; shift;; *) SRV=$1;;
-  esac; shift
-done
+MARK="# claude-mac-bridge"; TP=2222; CDP=9222; OS=$(uname)
+ask() { read -r -p "$1" "$2" </dev/tty; }
+b64d() { base64 -d 2>/dev/null || base64 -D; }
+enc() { echo "$1" | sed 's/[^a-zA-Z0-9]/-/g'; }
+die() { echo "ERROR: $*" >&2; exit 1; }
+GNUSED=(sed -i); [ "$OS" = Darwin ] && GNUSED=(sed -i '')
+
 guide() { cat <<'GUIDE'
 claude-mac-bridge: run Claude Code on a SERVER, with your Mac as its remote machine.
 
-SETUP (about 3 minutes)
- 1. Server: install Claude Code, run `claude`, then /login with your subscription.
- 2. Mac: System Settings > General > Sharing > Remote Login = ON.
- 3. Mac: you need SSH access to the server (password or key) as a normal user.
-    Use a non-root user; this script needs no sudo anywhere.
- 4. Mac, run:   ./install.sh user@server
-    Optional flags:
-      -p 2222            tunnel port on the server (default 2222, loopback only)
-      --mount            also mount your Mac home at ~/mac on the server (needs sshfs)
-      --history MAC:SRV  copy sessions: --history /Users/me/proj:/home/u/proj
- 5. Server: cd into your project and run `claude`. Claude now knows `ssh mac`.
+TWO COMMANDS (same script, it detects Linux vs Mac):
+ 1. SERVER (after installing Claude Code there and running /login):
+      bash install.sh          -> prints a pairing token, then waits for the Mac
+ 2. MAC (Remote Login ON: System Settings > General > Sharing):
+      bash install.sh          -> paste the token (or: bash install.sh <token>)
+ The server terminal then says "connected". On the server: `cd project && claude`.
+ Claude knows `ssh mac` is your local machine. Run as many sessions as you like;
+ they share one multiplexed connection.
 
-ENV: SSH_PORT=2200 (server sshd port), CLAUDE_CONFIG_DIR (Mac config dir, default ~/.claude)
+MORE
+ history MACPATH SRVPATH   (server) pull Mac Claude sessions for a project, then
+                           `cd SRVPATH && claude --resume`. CMB_MAC_CONFIG=dir if
+                           your Mac config is not ~/.claude.
+ mount                     (server) mount Mac home at ~/mac (needs sshfs)
+ remove                    undo everything on this machine (run on both)
+ Env for the server step: CMB_HOST, CMB_PORT (sshd port), CMB_MAC_USER.
 
-SAFETY: it refuses if the server has <150MB RAM or <50MB disk free. It changes only
- the SSH user's ~/.ssh/config, ~/.ssh/to_mac*, ~/.claude/CLAUDE.md. One idle ssh
- process (~3MB) runs on the server side. Nothing is ever deleted there.
- The server key is accepted on your Mac only via the tunnel (from 127.0.0.1).
-
-CHECK:     on the server run `ssh mac hostname`
-RESUME:    --history copies sessions; then `cd <server dir> && claude --resume`
-REMOVE:    ./install.sh --uninstall user@server
-LIMITS:    Mac asleep/offline = bridge down (it reconnects by itself when back).
-           Mac Chrome control needs Chrome started with --remote-debugging-port=9222.
+SAFETY
+ - Server refuses on <150MB free RAM or <50MB disk. Footprint: one idle ssh (~3MB).
+ - The token carries a tunnel-only key: it can open 127.0.0.1:2222/9222 reverse
+   forwards and nothing else (no shell). Treat the token like a password; `remove`
+   on the server revokes it. The server's SSH host key is pinned in the token.
+ - Your Mac accepts the server key only through the tunnel (from 127.0.0.1).
+ - Anyone with root on the server can reach your Mac. Use servers you trust.
+ - Mac asleep/offline = bridge down; it reconnects by itself.
+ - Mac Chrome control: start Chrome with --remote-debugging-port=9222.
 GUIDE
 }
 
-LABEL=com.claude-mac-bridge
-PLIST=$HOME/Library/LaunchAgents/$LABEL.plist
-KEY=$HOME/.ssh/claude_bridge
-MARK="# claude-mac-bridge"
-ME=$(whoami); SSH_PORT=${SSH_PORT:-22}
-ssh() { command ssh -p "$SSH_PORT" -o StrictHostKeyChecking=accept-new "$@"; }
+server() {
+  [ "$OS" = Linux ] || die "run this step on the Linux server"
+  avail=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo); disk=$(df -Pm "$HOME" | awk 'NR==2{print $4}')
+  echo "server: ${avail}MB RAM free, ${disk}MB disk free"
+  [ "$avail" -ge 150 ] || die "under 150MB RAM available; refusing"
+  [ "$disk" -ge 50 ] || die "under 50MB disk; refusing"
+  if command -v ss >/dev/null && ! ssh -o BatchMode=yes -o ConnectTimeout=3 mac true 2>/dev/null; then
+    ss -ltn | grep -E ":($TP|$CDP)\b" && die "tunnel port busy"
+  fi
+  mkdir -p ~/.ssh ~/.claude; chmod 700 ~/.ssh; touch ~/.ssh/authorized_keys ~/.ssh/config ~/.claude/CLAUDE.md; chmod 600 ~/.ssh/authorized_keys
+  [ -f ~/.ssh/cmb_tunnel ] || ssh-keygen -q -t ed25519 -N "" -f ~/.ssh/cmb_tunnel -C claude-mac-bridge
+  [ -f ~/.ssh/cmb_to_mac ] || ssh-keygen -q -t ed25519 -N "" -f ~/.ssh/cmb_to_mac -C claude-bridge
+  # tunnel key: reverse forwards to loopback only, no shell, no commands
+  "${GNUSED[@]}" "/$MARK/d" ~/.ssh/authorized_keys
+  echo "restrict,port-forwarding,permitlisten=\"127.0.0.1:$TP\",permitlisten=\"127.0.0.1:$CDP\",command=\"/bin/false\" $(cut -d' ' -f1,2 ~/.ssh/cmb_tunnel.pub) $MARK" >> ~/.ssh/authorized_keys
 
-[ $HELP = 1 ] && { guide; exit 0; }
-# No arguments: interactive Mac-side wizard (works with `curl | bash` too, via /dev/tty)
-if [ -z "$SRV" ]; then
-  [ -r /dev/tty ] || { guide; exit 1; }
-  ask() { read -r -p "$1" "$2" </dev/tty; }
-  echo "claude-mac-bridge: Mac-side setup. (Server side: install Claude Code there and /login first.)"
-  until nc -z localhost 22 2>/dev/null; do
-    echo "-> Turn ON: System Settings > General > Sharing > Remote Login"
-    ask "   Press Enter once it is on: " _
-  done
-  ask "Server login (user@host): " SRV
-  [ -n "$SRV" ] || { echo "need a server"; exit 1; }
-  ask "Server SSH port [22]: " p; SSH_PORT=${p:-22}
-  ask "Copy Claude history for a project? Mac project path (blank = skip): " m
-  if [ -n "$m" ]; then ask "  Same project's path on the server: " s; HISTORY="$m:$s"; fi
-fi
+  HOST=${CMB_HOST:-}; SPORT=${CMB_PORT:-}; MACUSER=${CMB_MAC_USER:-}
+  if [ -z "$HOST" ]; then d=$(curl -4fs -m3 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}'); ask "This server's public host/IP [$d]: " HOST; HOST=${HOST:-$d}; fi
+  [ -n "$SPORT" ] || { ask "This server's SSH port [22]: " SPORT; SPORT=${SPORT:-22}; }
+  [ -n "$MACUSER" ] || { ask "Your Mac username (run 'whoami' on the Mac): " MACUSER; }
+  [ -n "$MACUSER" ] || die "Mac username required"
 
-if [ $UNINSTALL = 1 ]; then
-  launchctl bootout gui/$(id -u) "$PLIST" 2>/dev/null || true
-  rm -f "$PLIST"
-  sed -i '' "/$MARK/d" "$HOME/.ssh/authorized_keys" 2>/dev/null || true
-  ssh -i "$KEY" "$SRV" "rm -f ~/.ssh/to_mac ~/.ssh/to_mac.pub; sed -i '/$MARK/,/$MARK-end/d' ~/.ssh/config ~/.claude/CLAUDE.md 2>/dev/null; fusermount -u ~/mac 2>/dev/null; rmdir ~/mac 2>/dev/null; true"
-  echo "removed"; exit 0
-fi
-
-nc -z localhost 22 2>/dev/null || { echo "Turn on Remote Login first (System Settings > General > Sharing)."; exit 1; }
-
-# 1. Mac -> server key (for the tunnel)
-[ -f "$KEY" ] || ssh-keygen -q -t ed25519 -N "" -f "$KEY" -C claude-mac-bridge
-ssh-copy-id -i "$KEY.pub" -p "$SSH_PORT" -o StrictHostKeyChecking=accept-new "$SRV" || { echo "cannot reach/auth to $SRV"; exit 1; }
-
-# 1b. read-only preflight on the server: refuse on low RAM/disk or busy ports
-ssh -i "$KEY" "$SRV" "avail=\$(awk '/MemAvailable/{print int(\$2/1024)}' /proc/meminfo)
-disk=\$(df -Pm \$HOME | awk 'NR==2{print \$4}')
-echo \"server: \${avail}MB RAM free, \${disk}MB disk free\"
-[ \$avail -ge 150 ] || { echo 'REFUSING: under 150MB RAM available'; exit 3; }
-[ \$disk -ge 50 ] || { echo 'REFUSING: under 50MB disk'; exit 3; }
-if command -v ss >/dev/null && ! ssh -o BatchMode=yes -o ConnectTimeout=3 mac true 2>/dev/null; then ss -ltn | grep -E ':($PORT|9222)\\b' && { echo 'REFUSING: port busy (use -p)'; exit 3; }; fi
-command -v rsync >/dev/null || echo 'note: no rsync on server (history sync unavailable)'
-exit 0"
-
-# 2. server -> Mac key; only accepted via the tunnel (arrives from 127.0.0.1)
-SRVPUB=$(ssh -i "$KEY" "$SRV" '[ -f ~/.ssh/to_mac ] || ssh-keygen -q -t ed25519 -N "" -f ~/.ssh/to_mac -C claude-bridge; cat ~/.ssh/to_mac.pub')
-mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys
-grep -qF "$SRVPUB" ~/.ssh/authorized_keys || echo "from=\"127.0.0.1,::1\" $SRVPUB $MARK" >> ~/.ssh/authorized_keys
-
-# 3. server-side config: `ssh mac` + a note for Claude (idempotent via markers)
-ssh -i "$KEY" "$SRV" "mkdir -p ~/.claude; touch ~/.ssh/config ~/.claude/CLAUDE.md
-sed -i '/$MARK/,/$MARK-end/d' ~/.ssh/config ~/.claude/CLAUDE.md
-cat >> ~/.ssh/config <<EOF
+  "${GNUSED[@]}" "/$MARK/,/$MARK-end/d" ~/.ssh/config ~/.claude/CLAUDE.md
+  cat >> ~/.ssh/config <<EOF
 $MARK
 Host mac
   HostName localhost
-  Port $PORT
-  User $ME
-  IdentityFile ~/.ssh/to_mac
+  Port $TP
+  User $MACUSER
+  IdentityFile ~/.ssh/cmb_to_mac
+  IdentitiesOnly yes
   StrictHostKeyChecking accept-new
   ServerAliveInterval 30
   ControlMaster auto
@@ -110,54 +82,104 @@ Host mac
   ControlPersist 10m
 $MARK-end
 EOF
-cat >> ~/.claude/CLAUDE.md <<EOF
+  cat >> ~/.claude/CLAUDE.md <<EOF
 $MARK
 # The user's Mac
-Your own machine is a server. The user's Mac is reachable with \\\`ssh mac\\\` (reverse tunnel, may be offline).
-Run Mac commands as \\\`ssh mac '<cmd>'\\\`. Mac files: \\\`ssh mac cat/ls\\\` or ~/mac if mounted.
-Mac Chrome DevTools (CDP) is on localhost:9222 here when Chrome runs with --remote-debugging-port=9222.
+Your own machine is a server. The user's Mac is reachable with \`ssh mac\` (reverse tunnel, may be offline).
+Run Mac commands as \`ssh mac '<cmd>'\`. Mac files: \`ssh mac cat/ls\`, or ~/mac if mounted.
+Mac Chrome DevTools (CDP) is on localhost:$CDP here when Chrome runs with --remote-debugging-port=$CDP.
 $MARK-end
-EOF"
+EOF
 
-# 4. keep the tunnel alive with launchd
-cat > "$PLIST" <<EOF
+  HK=$(awk '{print $1" "$2}' /etc/ssh/ssh_host_ed25519_key.pub 2>/dev/null || true)
+  TOKEN="cmb1.$(printf '%s\n' "$HOST" "$SPORT" "$(id -un)" "$HK" "$(cut -d' ' -f1,2 ~/.ssh/cmb_to_mac.pub)" "$(grep -v -- ----- ~/.ssh/cmb_tunnel | tr -d '\n')" | base64 | tr -d '\n')"
+  printf '\n=== PAIRING TOKEN (secret; paste on your Mac) ===\n%s\n\nOn the Mac run:  bash install.sh   (or: bash install.sh <token>)\n\nWaiting for the Mac (Ctrl-C to stop; re-run any time)...\n' "$TOKEN"
+  for _ in $(seq 120); do
+    ssh -o BatchMode=yes -o ConnectTimeout=3 mac 'echo "connected to $(hostname) as $(whoami)"' 2>/dev/null && { echo "Done. Now: cd <project> && claude"; return; }
+    sleep 5
+  done
+  echo "Not connected yet. Run the Mac step; then test with: ssh mac hostname"
+}
+
+mac() {
+  [ "$OS" = Darwin ] || die "run this step on the Mac"
+  TOKEN=${1:-}; [ -n "$TOKEN" ] || ask "Paste the token from the server: " TOKEN
+  D=$(printf %s "${TOKEN#cmb1.}" | b64d 2>/dev/null) || die "bad token"
+  host=$(echo "$D" | sed -n 1p); port=$(echo "$D" | sed -n 2p); suser=$(echo "$D" | sed -n 3p)
+  hk=$(echo "$D" | sed -n 4p); spub=$(echo "$D" | sed -n 5p); priv=$(echo "$D" | sed -n 6p)
+  [ -n "$host" ] && [ -n "$port" ] && [ -n "$suser" ] && [ -n "$spub" ] && [ -n "$priv" ] || die "bad token"
+  until nc -z localhost 22 2>/dev/null; do
+    echo "-> Turn ON: System Settings > General > Sharing > Remote Login"; [ -r /dev/tty ] || die "Remote Login is off"
+    ask "   Press Enter once it is on: " _
+  done
+  K=$HOME/.ssh/cmb_tunnel; KH=$HOME/.ssh/cmb_known_hosts; PLIST=$HOME/Library/LaunchAgents/com.claude-mac-bridge.plist
+  mkdir -p ~/.ssh "$HOME/Library/LaunchAgents"; touch ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys
+  (umask 077; printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\n%s\n-----END OPENSSH PRIVATE KEY-----\n' "$(echo "$priv" | fold -w70)" > "$K")
+  STRICT=accept-new; : > "$KH"
+  if [ -n "$hk" ]; then STRICT=yes; [ "$port" = 22 ] && echo "$host $hk" > "$KH" || echo "[$host]:$port $hk" > "$KH"; fi
+  # the server's key may log in here only through the tunnel (arrives from loopback)
+  "${GNUSED[@]}" "/$MARK/d" ~/.ssh/authorized_keys
+  echo "from=\"127.0.0.1,::1\" $spub $MARK" >> ~/.ssh/authorized_keys
+  cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>Label</key><string>$LABEL</string>
+<key>Label</key><string>com.claude-mac-bridge</string>
 <key>ProgramArguments</key><array>
-<string>/usr/bin/ssh</string><string>-p</string><string>$SSH_PORT</string><string>-N</string><string>-i</string><string>$KEY</string>
+<string>/usr/bin/ssh</string><string>-N</string><string>-i</string><string>$K</string>
+<string>-o</string><string>IdentitiesOnly=yes</string>
+<string>-o</string><string>UserKnownHostsFile=$KH</string>
+<string>-o</string><string>StrictHostKeyChecking=$STRICT</string>
 <string>-o</string><string>ExitOnForwardFailure=yes</string>
 <string>-o</string><string>ServerAliveInterval=30</string>
 <string>-o</string><string>ServerAliveCountMax=3</string>
-<string>-R</string><string>127.0.0.1:$PORT:localhost:22</string>
-<string>-R</string><string>127.0.0.1:9222:localhost:9222</string>
-<string>$SRV</string></array>
+<string>-p</string><string>$port</string>
+<string>-R</string><string>127.0.0.1:$TP:localhost:22</string>
+<string>-R</string><string>127.0.0.1:$CDP:localhost:$CDP</string>
+<string>$suser@$host</string></array>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>15</integer>
+<key>StandardErrorPath</key><string>/tmp/claude-mac-bridge.log</string>
 </dict></plist>
 EOF
-launchctl bootout gui/$(id -u) "$PLIST" 2>/dev/null || true
-launchctl bootstrap gui/$(id -u) "$PLIST"
+  launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  sleep 5
+  launchctl print "gui/$(id -u)/com.claude-mac-bridge" 2>/dev/null | grep -q "state = running" \
+    && echo "Mac side is up. The server terminal should now say 'connected'." \
+    || { echo "Tunnel not running yet; see /tmp/claude-mac-bridge.log"; exit 1; }
+}
 
-# 5. verify from the server side
-sleep 3
-ssh -i "$KEY" "$SRV" "ssh -o BatchMode=yes -o ConnectTimeout=8 mac 'echo bridge ok: \$(hostname)'" \
-  || { echo "bridge test failed"; exit 1; }
+history() {
+  [ $# -ge 2 ] || die "usage: install.sh history MACPATH SERVERPATH"
+  cfg=${CMB_MAC_CONFIG:-.claude}
+  rsync -au --mkpath mac:"$cfg/projects/$(enc "$1")/" "$HOME/.claude/projects/$(enc "$2")/" 2>/dev/null \
+    || { mkdir -p "$HOME/.claude/projects/$(enc "$2")"; rsync -au mac:"$cfg/projects/$(enc "$1")/" "$HOME/.claude/projects/$(enc "$2")/"; }
+  echo "copied; now: cd $2 && claude --resume"
+}
 
-# 6. optional: mount Mac home at ~/mac on the server (needs sshfs installed there)
-if [ $MOUNT = 1 ]; then
-  ssh -i "$KEY" "$SRV" 'command -v sshfs >/dev/null || { echo "sshfs missing on server (apt install sshfs); skipped"; exit 0; }
-mkdir -p ~/mac; sshfs -o reconnect,ServerAliveInterval=15 mac:/Users/'"$ME"' ~/mac && echo mounted ~/mac'
-fi
-# 7. optional: copy Claude session history so `claude --resume` on the server sees Mac sessions.
-# Claude keys sessions by project path, so Mac path -> server path. Never deletes, never overwrites newer files.
-if [ -n "$HISTORY" ]; then
-  enc() { echo "$1" | sed 's/[^a-zA-Z0-9]/-/g'; }
-  MACDIR=${HISTORY%%:*}; SRVDIR=${HISTORY#*:}
-  SRC=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(enc "$MACDIR")
-  [ -d "$SRC" ] || { echo "no Mac sessions at $SRC"; exit 1; }
-  ssh -i "$KEY" "$SRV" "mkdir -p ~/.claude/projects/$(enc "$SRVDIR")"
-  rsync -au -e "ssh -i $KEY -p $SSH_PORT" "$SRC/" "$SRV:.claude/projects/$(enc "$SRVDIR")/"
-  echo "history copied; on the server: cd $SRVDIR && claude --resume"
-fi
-echo "done. On the server: ssh mac"
+mount_mac() {
+  command -v sshfs >/dev/null || die "sshfs not installed on this server"
+  mkdir -p ~/mac; sshfs -o reconnect,ServerAliveInterval=15 "mac:" ~/mac && echo "mounted ~/mac"
+}
+
+remove() {
+  if [ "$OS" = Darwin ]; then
+    launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.claude-mac-bridge.plist 2>/dev/null || true
+    rm -f ~/Library/LaunchAgents/com.claude-mac-bridge.plist ~/.ssh/cmb_tunnel ~/.ssh/cmb_known_hosts
+    "${GNUSED[@]}" "/$MARK/d" ~/.ssh/authorized_keys 2>/dev/null || true
+  else
+    fusermount -u ~/mac 2>/dev/null || true; rmdir ~/mac 2>/dev/null || true
+    "${GNUSED[@]}" "/$MARK/d" ~/.ssh/authorized_keys 2>/dev/null || true
+    "${GNUSED[@]}" "/$MARK/,/$MARK-end/d" ~/.ssh/config ~/.claude/CLAUDE.md 2>/dev/null || true
+    rm -f ~/.ssh/cmb_tunnel* ~/.ssh/cmb_to_mac*
+  fi
+  echo "removed"
+}
+
+case "${1:-}" in
+  -h|--help|help) guide;;
+  history) shift; history "$@";;
+  mount) mount_mac;;
+  remove|uninstall|--uninstall) remove;;
+  *) if [ "$OS" = Darwin ]; then mac "${1:-}"; else server; fi;;
+esac
