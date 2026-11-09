@@ -66,15 +66,27 @@ server() {
   mkdir -p ~/.ssh ~/.claude; chmod 700 ~/.ssh; touch ~/.ssh/authorized_keys ~/.ssh/config ~/.claude/CLAUDE.md; chmod 600 ~/.ssh/authorized_keys
   [ -f ~/.ssh/cmb_tunnel ] || ssh-keygen -q -t ed25519 -N "" -f ~/.ssh/cmb_tunnel -C claude-mac-bridge
   [ -f ~/.ssh/cmb_to_mac ] || ssh-keygen -q -t ed25519 -N "" -f ~/.ssh/cmb_to_mac -C claude-bridge
-  # tunnel key: reverse forwards to loopback only, no shell, no commands
+  # The only thing the tunnel key may run is this script: it records the Mac's username
+  # (sent by the Mac as the "command") and keeps the tunnel open. No shell, no other commands.
+  cat > ~/.ssh/cmb_hello <<'HELLO'
+#!/bin/sh
+c="$SSH_ORIGINAL_COMMAND"
+if [ "$c" = kill-old ]; then pkill -u "$(id -u)" -f 'sleep 2147483647' 2>/dev/null; exit 0; fi
+case "$c" in ""|*[!a-zA-Z0-9._-]*) exit 1;; esac
+[ -s "$HOME/.ssh/cmb_macuser" ] && [ "$(cat "$HOME/.ssh/cmb_macuser")" != "$c" ] && exit 1
+echo "$c" > "$HOME/.ssh/cmb_macuser"
+sed -i "/# claude-mac-bridge\$/,/# claude-mac-bridge-end/ s/^  User .*/  User $c/" "$HOME/.ssh/config"
+exec sleep 2147483647
+HELLO
+  chmod 700 ~/.ssh/cmb_hello
   "${GNUSED[@]}" "/$MARK/d" ~/.ssh/authorized_keys
-  echo "restrict,port-forwarding,permitlisten=\"127.0.0.1:$TP\",permitlisten=\"127.0.0.1:$CDP\",command=\"/bin/false\" $(cut -d' ' -f1,2 ~/.ssh/cmb_tunnel.pub) $MARK" >> ~/.ssh/authorized_keys
+  echo "restrict,port-forwarding,permitlisten=\"127.0.0.1:$TP\",permitlisten=\"127.0.0.1:$CDP\",command=\"$HOME/.ssh/cmb_hello\" $(cut -d' ' -f1,2 ~/.ssh/cmb_tunnel.pub) $MARK" >> ~/.ssh/authorized_keys
 
-  HOST=${CMB_HOST:-}; SPORT=${CMB_PORT:-}; MACUSER=${CMB_MAC_USER:-}
-  if [ -z "$HOST" ]; then d=$(curl -4fs -m3 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}'); ask "This server's public host/IP [$d]: " HOST; HOST=${HOST:-$d}; fi
-  [ -n "$SPORT" ] || { ask "This server's SSH port [22]: " SPORT; SPORT=${SPORT:-22}; }
-  [ -n "$MACUSER" ] || { ask "Your Mac username (run 'whoami' on the Mac): " MACUSER; }
-  [ -n "$MACUSER" ] || die "Mac username required"
+  # auto-detect how the Mac reaches this server: the address/port of the SSH session we are in
+  HOST=${CMB_HOST:-$(echo "${SSH_CONNECTION:-}" | awk '{print $3}')}; SPORT=${CMB_PORT:-$(echo "${SSH_CONNECTION:-}" | awk '{print $4}')}
+  [ -n "$HOST" ] || HOST=$(curl -4fs -m3 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
+  SPORT=${SPORT:-22}; MACUSER=$(cat ~/.ssh/cmb_macuser 2>/dev/null || echo unknown)
+  echo "server address for the token: $HOST:$SPORT"
 
   "${GNUSED[@]}" "/$MARK/,/$MARK-end/d" ~/.ssh/config ~/.claude/CLAUDE.md
   cat >> ~/.ssh/config <<EOF
@@ -103,9 +115,9 @@ EOF
 
   HK=$(awk '{print $1" "$2}' /etc/ssh/ssh_host_ed25519_key.pub 2>/dev/null || true)
   TOKEN="cmb1.$(printf '%s\n' "$HOST" "$SPORT" "$(id -un)" "$HK" "$(cut -d' ' -f1,2 ~/.ssh/cmb_to_mac.pub)" "$(grep -v -- ----- ~/.ssh/cmb_tunnel | tr -d '\n')" | base64 | tr -d '\n')"
-  printf '\n=== PAIRING TOKEN (secret; paste on your Mac) ===\n%s\n\nOn the Mac run:  bash install.sh   (or: bash install.sh <token>)\n\nWaiting for the Mac (Ctrl-C to stop; re-run any time)...\n' "$TOKEN"
+  printf '\n=== PAIRING TOKEN (secret; paste on your Mac) ===\n%s\n\nOn the Mac run the same one-liner and paste the token.\n\nWaiting for the Mac (Ctrl-C to stop; re-run any time)...\n' "$TOKEN"
   for _ in $(seq 120); do
-    ssh -o BatchMode=yes -o ConnectTimeout=3 mac 'echo "connected to $(hostname) as $(whoami)"' 2>/dev/null && { echo "Done. Now: cd <project> && claude"; return; }
+    ssh -o BatchMode=yes -o ConnectTimeout=3 mac 'echo "connected to $(hostname) as $(whoami)"' 2>/dev/null && { echo "Done. Now: export PATH=\$HOME/.local/bin:\$PATH; cd <project> && claude  (first run: /login)"; return; }
     sleep 5
   done
   echo "Not connected yet. Run the Mac step; then test with: ssh mac hostname"
@@ -130,23 +142,21 @@ mac() {
   # the server's key may log in here only through the tunnel (arrives from loopback)
   "${GNUSED[@]}" "/$MARK/d" ~/.ssh/authorized_keys
   echo "from=\"127.0.0.1,::1\" $spub $MARK" >> ~/.ssh/authorized_keys
+  # launchd runs this: clear any stale server-side session (after sleep/wake), then open the tunnel
+  # and tell the server our username (the only "command" the tunnel key is allowed to send).
+  W=$HOME/.ssh/cmb_run.sh
+  cat > "$W" <<EOF
+O="-i $K -o IdentitiesOnly=yes -o UserKnownHostsFile=$KH -o StrictHostKeyChecking=$STRICT -o ConnectTimeout=15 -p $port"
+ssh \$O $suser@$host kill-old >/dev/null 2>&1
+exec ssh \$O -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -R 127.0.0.1:$TP:localhost:22 -R 127.0.0.1:$CDP:localhost:$CDP $suser@$host "\$(id -un)"
+EOF
   cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>com.claude-mac-bridge</string>
 <key>ProgramArguments</key><array>
-<string>/usr/bin/ssh</string><string>-N</string><string>-i</string><string>$K</string>
-<string>-o</string><string>IdentitiesOnly=yes</string>
-<string>-o</string><string>UserKnownHostsFile=$KH</string>
-<string>-o</string><string>StrictHostKeyChecking=$STRICT</string>
-<string>-o</string><string>ExitOnForwardFailure=yes</string>
-<string>-o</string><string>ServerAliveInterval=30</string>
-<string>-o</string><string>ServerAliveCountMax=3</string>
-<string>-p</string><string>$port</string>
-<string>-R</string><string>127.0.0.1:$TP:localhost:22</string>
-<string>-R</string><string>127.0.0.1:$CDP:localhost:$CDP</string>
-<string>$suser@$host</string></array>
+<string>/bin/sh</string><string>$W</string></array>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>15</integer>
 <key>StandardErrorPath</key><string>/tmp/claude-mac-bridge.log</string>
 </dict></plist>
@@ -175,13 +185,13 @@ mount_mac() {
 remove() {
   if [ "$OS" = Darwin ]; then
     launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.claude-mac-bridge.plist 2>/dev/null || true
-    rm -f ~/Library/LaunchAgents/com.claude-mac-bridge.plist ~/.ssh/cmb_tunnel ~/.ssh/cmb_known_hosts
+    rm -f ~/Library/LaunchAgents/com.claude-mac-bridge.plist ~/.ssh/cmb_*
     "${GNUSED[@]}" "/$MARK/d" ~/.ssh/authorized_keys 2>/dev/null || true
   else
     fusermount -u ~/mac 2>/dev/null || true; rmdir ~/mac 2>/dev/null || true
     "${GNUSED[@]}" "/$MARK/d" ~/.ssh/authorized_keys 2>/dev/null || true
     "${GNUSED[@]}" "/$MARK/,/$MARK-end/d" ~/.ssh/config ~/.claude/CLAUDE.md 2>/dev/null || true
-    rm -f ~/.ssh/cmb_tunnel* ~/.ssh/cmb_to_mac*
+    rm -f ~/.ssh/cmb_*; pkill -u "$(id -u)" -f "sleep 2147483647" 2>/dev/null || true
   fi
   echo "removed"
 }

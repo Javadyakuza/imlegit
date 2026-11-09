@@ -14,7 +14,7 @@ It prints a **pairing token** and waits.
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Javadyakuza/claude-mac-bridge/main/install.sh)
 ```
-Paste the token. The server terminal prints `connected to <your-mac>`. Then on the server: `cd project && claude`.
+Paste the token (that is all: the server address, SSH port and your Mac username are detected automatically). The server terminal prints `connected to <your-mac>`. Then on the server: `cd project && claude`.
 
 Same script both times; it detects Linux vs macOS. No root, no prior SSH access from the Mac to the server, no sudo anywhere.
 
@@ -39,7 +39,7 @@ Same script both times; it detects Linux vs macOS. No root, no prior SSH access 
 
 ## The token
 
-It carries the server address, the server's SSH **host key** (pinned, so no man-in-the-middle on first connect), the key that lets the server log in to your Mac, and a **tunnel-only private key**. That key is locked in the server's `authorized_keys` with `restrict,port-forwarding,permitlisten=127.0.0.1:2222,permitlisten=127.0.0.1:9222,command="/bin/false"`: it can open those two reverse forwards and nothing else (no shell). Treat the token like a password; `remove` on the server revokes it.
+It carries the server address, the server's SSH **host key** (pinned, so no man-in-the-middle on first connect), the key that lets the server log in to your Mac, and a **tunnel-only private key**. That key is locked in the server's `authorized_keys` with `restrict,port-forwarding,permitlisten=127.0.0.1:2222,permitlisten=127.0.0.1:9222,command=~/.ssh/cmb_hello`: it can open those two reverse forwards and run one tiny script that records your Mac username (first name wins) and holds the tunnel open. No shell, no other commands. Treat the token like a password; `remove` on the server revokes it.
 
 ## What you get on the server
 
