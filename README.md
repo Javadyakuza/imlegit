@@ -1,69 +1,75 @@
-# claude-mac-bridge
+# imlegit
 
-Run **Claude Code on an always-on server** (your subscription lives there) while your **Mac stays your personal machine that Claude can still reach**: its files, shell and Chrome. Open as many Claude sessions on the server as you like; they all share one tunnel.
+Type `imlegit` in your Mac terminal and get **Claude Code running on your server** (your subscription lives there), working on **your Mac** through a private tunnel: its shell, files and Chrome. Open as many sessions as you like.
 
-## Install: two commands, paired by a token
+## Install: two commands, one token
 
-**1. On the server** (the script offers to install Claude Code there if missing; you then run `claude` once and `/login`):
+**1. On the server** (the script installs Claude Code there if missing):
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Javadyakuza/claude-mac-bridge/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Javadyakuza/imlegit/main/install.sh)
 ```
-It prints a **pairing token** and waits.
+It prints a **pairing token** and waits. Nothing to type, nothing to configure.
 
 **2. On your Mac** (System Settings > General > Sharing > **Remote Login = ON**):
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Javadyakuza/claude-mac-bridge/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Javadyakuza/imlegit/main/install.sh)
 ```
-Paste the token (that is all: the server address, SSH port and your Mac username are detected automatically). The server terminal prints `connected to <your-mac>`. Then on the server: `cd project && claude`.
+Paste the token. The Mac checks the whole loop itself and prints `Ready`; the server terminal prints `connected`.
 
-Same script both times; it detects Linux vs macOS. No root, no prior SSH access from the Mac to the server, no sudo anywhere.
+## Use
+
+```bash
+imlegit                 # in any Mac terminal: opens Claude Code on the server
+imlegit --resume        # arguments go to claude
+```
+- First run only: `/login` with your subscription (on the server).
+- Claude is told your current Mac directory, and reaches the Mac with `ssh mac '<cmd>'`.
+- Each `imlegit` is its own session, all sharing one tunnel. The Mac stays awake while a session is open (`caffeinate`).
+- If the terminal closes or the network drops, the session ends; continue with `imlegit --resume`.
 
 ## Architecture
 
 ```
- Mac (launchd agent)                     Server
- ┌──────────────┐   ssh -N -R ...       ┌───────────────────────────────┐
- │ sshd :22     │◄──────────────────────│ 127.0.0.1:2222 → Mac sshd      │
- │ Chrome :9222 │◄──────────────────────│ 127.0.0.1:9222 → Mac Chrome    │
- └──────────────┘  (Mac dials OUT,      │                               │
-                    auto-reconnects)    │ claude session 1 ┐            │
-                                        │ claude session 2 ├ `ssh mac`  │
-                                        │ claude session N ┘ (1 shared  │
-                                        │                    connection)│
-                                        └───────────────────────────────┘
+ Mac                                       Server
+ ┌────────────────────┐   login (imlegit)  ┌───────────────────────────────┐
+ │ `imlegit` ─────────┼───────────────────►│ ~/imlegit: claude              │
+ │                    │                    │      │ ssh mac                 │
+ │ sshd :22  ◄────────┼── reverse tunnel ──┤      ▼                         │
+ │ Chrome :9222 ◄─────┼── (Mac dials out,  │ 127.0.0.1:2222 → Mac sshd      │
+ │ launchd keeps up   │    auto-reconnect) │ 127.0.0.1:9222 → Mac Chrome    │
+ └────────────────────┘                    └───────────────────────────────┘
 ```
+- The **Mac dials out** (launchd-managed), so it works behind NAT with no open ports and reconnects after sleep.
+- `ssh mac` from the server is multiplexed (`ControlMaster`): many sessions, one connection.
+- The server's `~/.claude/CLAUDE.md` tells Claude that `ssh mac` is your local machine.
 
-- The **Mac dials out**, kept alive by launchd, so it works behind NAT with no open ports, and reconnects after sleep or network loss.
-- On the server, `ssh mac` reaches your Mac through the loopback-only tunnel. `ControlMaster` multiplexes all Claude sessions over one connection.
-- A short block in the server's `~/.claude/CLAUDE.md` tells Claude that `ssh mac` is your local machine; that is how it uses it by default.
+## The token and keys
 
-## The token
+- The token holds the server address and SSH host key (pinned: no man-in-the-middle on first connect) plus a **tunnel-only key**. In the server's `authorized_keys` that key is limited to `restrict,port-forwarding,permitlisten=127.0.0.1:2222/9222,command=~/.ssh/cmb_hello`: it can open those two forwards and run one tiny script. No shell.
+- On first use the Mac sends its username and its own **login key** through that script. **First pairing wins**: the token can't register a second key or change the name afterwards, so it is single-use in effect. Treat it like a password until you've used it.
+- The login key gives the Mac a normal shell on the server (that is what `imlegit` uses).
+- The server's key is accepted on your Mac only from 127.0.0.1 (through the tunnel).
+- Anyone with root on the server can reach your Mac through the tunnel. Use servers you trust.
 
-It carries the server address, the server's SSH **host key** (pinned, so no man-in-the-middle on first connect), the key that lets the server log in to your Mac, and a **tunnel-only private key**. That key is locked in the server's `authorized_keys` with `restrict,port-forwarding,permitlisten=127.0.0.1:2222,permitlisten=127.0.0.1:9222,command=~/.ssh/cmb_hello`: it can open those two reverse forwards and run one tiny script that records your Mac username (first name wins) and holds the tunnel open. No shell, no other commands. Treat the token like a password; `remove` on the server revokes it.
+## Small servers
 
-## What you get on the server
+The server step refuses under 150MB free RAM or 50MB free disk, warns under 600MB (a Claude session needs a few hundred MB), and checks the tunnel ports are free. Footprint: one idle `ssh` and one `sleep` process plus edits to `~/.ssh/{config,authorized_keys,cmb_*}`, `~/.claude/CLAUDE.md` and a `~/imlegit` folder.
 
-- `ssh mac '<cmd>'`: commands on your Mac.
-- Mac Chrome DevTools on `localhost:9222` (start Chrome with `--remote-debugging-port=9222`).
-- `bash install.sh history /Users/me/proj /home/me/proj`: pull your local Claude sessions for a project, then `cd /home/me/proj && claude --resume`. Never deletes or overwrites newer files. `CMB_MAC_CONFIG=.claude-acc2` if your Mac config dir differs.
-- `bash install.sh mount`: Mac home at `~/mac` via sshfs (needs sshfs on the server).
+## Other commands
 
-## Safety (small servers)
-
-- The server step refuses to run under 150MB free RAM or 50MB free disk, or if the tunnel ports are busy.
-- Footprint: one idle `ssh` process (~3MB) on the server side plus edits to `~/.ssh/config`, `~/.ssh/authorized_keys`, `~/.ssh/cmb_*`, `~/.claude/CLAUDE.md`. Nothing is deleted.
-- The server's key is accepted on your Mac only from 127.0.0.1, i.e. through the tunnel.
-- Anyone with root on the server can use the tunnel to reach your Mac. Use servers you trust.
-
-## Remove
-
-Run `bash install.sh remove` on each machine.
+```bash
+bash install.sh history /Users/me/proj /home/me/proj   # (server) pull a Mac project's Claude sessions
+bash install.sh mount                                  # (server) Mac home at ~/mac via sshfs
+bash install.sh remove                                 # undo everything; run on each machine
+```
+`CMB_HOST` / `CMB_PORT` override the auto-detected server address; `CMB_MAC_CONFIG` for a non-default Mac config dir with `history`.
 
 ## Limits
 
-- Mac asleep or offline means the bridge is down; it reconnects when the Mac is back (`caffeinate` helps).
-- Remote screen control (computer-use) is not bridged.
-- Mac client only. Server: any Linux with OpenSSH 7.8+.
-- Tunnel ports are fixed at 2222 and 9222 (loopback).
+- One Mac per server (fixed loopback ports 2222/9222).
+- Mac asleep or offline: `imlegit` still opens, but Mac commands fail until it's back.
+- The server edits Mac files through `ssh mac`, not Claude's native file tools, unless you use `mount` (needs sshfs).
+- Chrome control needs Chrome started with `--remote-debugging-port=9222`. Screen control is not bridged.
+- Mac client only. Server: Linux with OpenSSH 7.8+.
 
 MIT

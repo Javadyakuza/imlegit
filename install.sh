@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# claude-mac-bridge: Claude Code on a SERVER, your Mac as its remote machine.
+# imlegit: type `imlegit` on your Mac; Claude Code runs on your SERVER and works on the Mac.
 #   1) on the server:  bash install.sh        -> prints a pairing token
 #   2) on the Mac:     bash install.sh        -> paste the token
 # Extra: history MACPATH SRVPATH | mount | remove | help.  No root needed anywhere.
@@ -13,14 +13,14 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 GNUSED=(sed -i); [ "$OS" = Darwin ] && GNUSED=(sed -i '')
 
 guide() { cat <<'GUIDE'
-claude-mac-bridge: run Claude Code on a SERVER, with your Mac as its remote machine.
+imlegit: Claude Code runs on a SERVER and works on your Mac. Type `imlegit` on the Mac.
 
 TWO COMMANDS (same script, it detects Linux vs Mac):
- 1. SERVER (after installing Claude Code there and running /login):
+ 1. SERVER (offers to install Claude Code there if missing):
       bash install.sh          -> prints a pairing token, then waits for the Mac
  2. MAC (Remote Login ON: System Settings > General > Sharing):
       bash install.sh          -> paste the token (or: bash install.sh <token>)
- The server terminal then says "connected". On the server: `cd project && claude`.
+ The Mac prints "Ready"; then type `imlegit` in any Mac terminal (first run: /login).
  Claude knows `ssh mac` is your local machine. Run as many sessions as you like;
  they share one multiplexed connection.
 
@@ -70,15 +70,31 @@ server() {
   # (sent by the Mac as the "command") and keeps the tunnel open. No shell, no other commands.
   cat > ~/.ssh/cmb_hello <<'HELLO'
 #!/bin/sh
-c="$SSH_ORIGINAL_COMMAND"
+c="$SSH_ORIGINAL_COMMAND"; d="$HOME/.ssh"
 if [ "$c" = kill-old ]; then pkill -u "$(id -u)" -f 'sleep 2147483647' 2>/dev/null; exit 0; fi
-case "$c" in ""|*[!a-zA-Z0-9._-]*) exit 1;; esac
-[ -s "$HOME/.ssh/cmb_macuser" ] && [ "$(cat "$HOME/.ssh/cmb_macuser")" != "$c" ] && exit 1
-echo "$c" > "$HOME/.ssh/cmb_macuser"
-sed -i "/# claude-mac-bridge\$/,/# claude-mac-bridge-end/ s/^  User .*/  User $c/" "$HOME/.ssh/config"
+# pairing message from the Mac: "<mac username> ssh-ed25519 <key>". First pairing wins; anything else is refused.
+u=${c%% *}; k=${c#* }
+case "$u" in ""|*[!a-zA-Z0-9._-]*) exit 1;; esac
+case "$k" in "ssh-ed25519 "*) ;; *) exit 1;; esac
+b=${k#ssh-ed25519 }; case "$b" in ""|*[!A-Za-z0-9+/=]*) exit 1;; esac
+if [ -s "$d/cmb_macuser" ]; then [ "$(cat "$d/cmb_macuser")" = "$u" ] && [ "$(cat "$d/cmb_login_pub")" = "$k" ] || exit 1; fi
+echo "$u" > "$d/cmb_macuser"; echo "$k" > "$d/cmb_login_pub"
+grep -qF "$b" "$d/authorized_keys" || echo "$k imlegit-login # cmb-login" >> "$d/authorized_keys"
+sed -i "/# claude-mac-bridge\$/,/# claude-mac-bridge-end/ s/^  User .*/  User $u/" "$d/config"
 exec sleep 2147483647
 HELLO
   chmod 700 ~/.ssh/cmb_hello
+  # what `imlegit` runs on the server: Claude Code in a stable workspace, told where the Mac is
+  mkdir -p ~/imlegit
+  cat > ~/.ssh/cmb_start <<'START'
+#!/bin/bash
+export PATH="$HOME/.local/bin:$PATH"
+cwd=$(printf %s "$1" | base64 -d); shift
+command -v claude >/dev/null || { echo "Claude Code is not installed on this server. Install it: curl -fsSL https://claude.ai/install.sh | bash"; exit 1; }
+cd "$HOME/imlegit"
+exec claude --append-system-prompt "The user started you from their Mac (working dir: $cwd). You run on a remote server; the Mac is reachable with 'ssh mac' (see ~/.claude/CLAUDE.md)." "$@"
+START
+  chmod 700 ~/.ssh/cmb_start
   "${GNUSED[@]}" "/$MARK/d" ~/.ssh/authorized_keys
   echo "restrict,port-forwarding,permitlisten=\"127.0.0.1:$TP\",permitlisten=\"127.0.0.1:$CDP\",command=\"$HOME/.ssh/cmb_hello\" $(cut -d' ' -f1,2 ~/.ssh/cmb_tunnel.pub) $MARK" >> ~/.ssh/authorized_keys
 
@@ -117,7 +133,7 @@ EOF
   TOKEN="cmb1.$(printf '%s\n' "$HOST" "$SPORT" "$(id -un)" "$HK" "$(cut -d' ' -f1,2 ~/.ssh/cmb_to_mac.pub)" "$(grep -v -- ----- ~/.ssh/cmb_tunnel | tr -d '\n')" | base64 | tr -d '\n')"
   printf '\n=== PAIRING TOKEN (secret; paste on your Mac) ===\n%s\n\nOn the Mac run the same one-liner and paste the token.\n\nWaiting for the Mac (Ctrl-C to stop; re-run any time)...\n' "$TOKEN"
   for _ in $(seq 120); do
-    ssh -o BatchMode=yes -o ConnectTimeout=3 mac 'echo "connected to $(hostname) as $(whoami)"' 2>/dev/null && { echo "Done. Now: export PATH=\$HOME/.local/bin:\$PATH; cd <project> && claude  (first run: /login)"; return; }
+    ssh -o BatchMode=yes -o ConnectTimeout=3 mac 'echo "connected to $(hostname) as $(whoami)"' 2>/dev/null && { echo "Done. On your Mac, type:  imlegit   (first run asks you to /login on the server)"; return; }
     sleep 5
   done
   echo "Not connected yet. Run the Mac step; then test with: ssh mac hostname"
@@ -134,6 +150,7 @@ mac() {
     echo "-> Turn ON: System Settings > General > Sharing > Remote Login"; [ -r /dev/tty ] || die "Remote Login is off"
     ask "   Press Enter once it is on: " _
   done
+  NEWPATH=0; LK=$HOME/.ssh/cmb_login; [ -f "$LK" ] || ssh-keygen -q -t ed25519 -N "" -f "$LK" -C imlegit-login
   K=$HOME/.ssh/cmb_tunnel; KH=$HOME/.ssh/cmb_known_hosts; PLIST=$HOME/Library/LaunchAgents/com.claude-mac-bridge.plist
   mkdir -p ~/.ssh "$HOME/Library/LaunchAgents"; touch ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys
   (umask 077; printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\n%s\n-----END OPENSSH PRIVATE KEY-----\n' "$(echo "$priv" | fold -w70)" > "$K")
@@ -148,8 +165,17 @@ mac() {
   cat > "$W" <<EOF
 O="-i $K -o IdentitiesOnly=yes -o UserKnownHostsFile=$KH -o StrictHostKeyChecking=$STRICT -o ConnectTimeout=15 -p $port"
 ssh \$O $suser@$host kill-old >/dev/null 2>&1
-exec ssh \$O -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -R 127.0.0.1:$TP:localhost:22 -R 127.0.0.1:$CDP:localhost:$CDP $suser@$host "\$(id -un)"
+exec ssh \$O -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -R 127.0.0.1:$TP:localhost:22 -R 127.0.0.1:$CDP:localhost:$CDP $suser@$host "\$(id -un) \$(cut -d' ' -f1,2 $LK.pub)"
 EOF
+  # `imlegit`: Claude Code on the server, started from this terminal. caffeinate keeps the Mac awake meanwhile.
+  mkdir -p ~/.local/bin
+  cat > ~/.local/bin/imlegit <<EOF
+#!/bin/bash
+B=\$(printf %s "\$PWD" | base64 | tr -d '\n')
+exec caffeinate -i ssh -t -i $LK -o IdentitiesOnly=yes -o UserKnownHostsFile=$KH -o StrictHostKeyChecking=$STRICT -o ServerAliveInterval=30 -p $port $suser@$host "~/.ssh/cmb_start \$B\$(printf ' %q' "\$@")"
+EOF
+  chmod +x ~/.local/bin/imlegit
+  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo "export PATH=\"\$HOME/.local/bin:\$PATH\" $MARK" >> ~/.zshrc; NEWPATH=1;; esac
   cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -163,10 +189,13 @@ EOF
 EOF
   launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
   launchctl bootstrap "gui/$(id -u)" "$PLIST"
-  sleep 5
-  launchctl print "gui/$(id -u)/com.claude-mac-bridge" 2>/dev/null | grep -q "state = running" \
-    && echo "Mac side is up. The server terminal should now say 'connected'." \
-    || { echo "Tunnel not running yet; see /tmp/claude-mac-bridge.log"; exit 1; }
+  echo "Connecting..."
+  for _ in $(seq 12); do
+    sleep 3
+    ssh -i "$LK" -o IdentitiesOnly=yes -o UserKnownHostsFile="$KH" -o StrictHostKeyChecking=$STRICT -o BatchMode=yes -o ConnectTimeout=5 -p "$port" "$suser@$host" 'ssh -o BatchMode=yes -o ConnectTimeout=5 mac true' 2>/dev/null && {
+      echo "Ready. In a new terminal (or after: source ~/.zshrc) type:  imlegit"; [ $NEWPATH = 1 ] && echo "(added ~/.local/bin to PATH in ~/.zshrc)"; return; }
+  done
+  echo "Not connected yet; check /tmp/claude-mac-bridge.log and re-run."; exit 1
 }
 
 history() {
@@ -185,13 +214,13 @@ mount_mac() {
 remove() {
   if [ "$OS" = Darwin ]; then
     launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.claude-mac-bridge.plist 2>/dev/null || true
-    rm -f ~/Library/LaunchAgents/com.claude-mac-bridge.plist ~/.ssh/cmb_*
+    rm -f ~/Library/LaunchAgents/com.claude-mac-bridge.plist ~/.ssh/cmb_* ~/.local/bin/imlegit; "${GNUSED[@]}" "/$MARK/d" ~/.zshrc 2>/dev/null || true
     "${GNUSED[@]}" "/$MARK/d" ~/.ssh/authorized_keys 2>/dev/null || true
   else
     fusermount -u ~/mac 2>/dev/null || true; rmdir ~/mac 2>/dev/null || true
     "${GNUSED[@]}" "/$MARK/d" ~/.ssh/authorized_keys 2>/dev/null || true
     "${GNUSED[@]}" "/$MARK/,/$MARK-end/d" ~/.ssh/config ~/.claude/CLAUDE.md 2>/dev/null || true
-    rm -f ~/.ssh/cmb_*; pkill -u "$(id -u)" -f "sleep 2147483647" 2>/dev/null || true
+    "${GNUSED[@]}" "/# cmb-login/d" ~/.ssh/authorized_keys 2>/dev/null || true; rmdir ~/imlegit 2>/dev/null || true; rm -f ~/.ssh/cmb_*; pkill -u "$(id -u)" -f "sleep 2147483647" 2>/dev/null || true
   fi
   echo "removed"
 }
