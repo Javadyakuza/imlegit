@@ -60,9 +60,19 @@ The server step refuses under 150MB free RAM or 50MB free disk, warns under 600M
 ```bash
 bash install.sh history /Users/me/proj /home/me/proj   # (server) pull a Mac project's Claude sessions
 bash install.sh mount                                  # (server) Mac home at ~/mac via sshfs
+bash install.sh allow                                  # (server) let Claude run `ssh mac ...` without prompting (opt-in)
 bash install.sh remove                                 # undo everything; run on each machine
 ```
 `CMB_HOST` / `CMB_PORT` override the auto-detected server address; `CMB_MAC_CONFIG` for a non-default Mac config dir with `history`.
+
+## Handled automatically
+
+- Re-running the server step while connected changes nothing ("already paired"); when not connected it issues a fresh token, so re-pairing a wiped or different Mac just works.
+- A token pasted with its banner, or wrapped over several lines, is cleaned up.
+- Your own `Host mac` in the server's `~/.ssh/config` can't shadow ours (our block goes first); the Mac's host key lives in its own known-hosts file, so a different Mac never trips a host-key warning.
+- Server address and SSH port come from your current SSH session (or the listening sshd); the host key pinned is ed25519, ecdsa or rsa, whichever exists.
+- The server step stops with a clear message if sshd disables port forwarding, a tunnel port is busy, or required tools are missing; the Mac step explains the likely causes if pairing fails.
+- Mac shell rc is `~/.zshrc` or `~/.bash_profile` depending on `$SHELL`; `remove` cleans both.
 
 ## Limits
 

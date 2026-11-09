@@ -60,10 +60,17 @@ server() {
     esac
     echo ">>> After pairing, run 'claude' once on this server and /login with your subscription."
   fi
-  if command -v ss >/dev/null && ! ssh -o BatchMode=yes -o ConnectTimeout=3 mac true 2>/dev/null; then
-    ss -ltn | grep -E ":($TP|$CDP)\b" && die "tunnel port busy"
+  for t in ssh ssh-keygen base64 awk sed; do command -v "$t" >/dev/null || die "missing tool on server: $t"; done
+  # already paired and live: nothing to do (re-running must not break a working setup)
+  if ssh -o BatchMode=yes -o ConnectTimeout=3 mac true 2>/dev/null; then
+    echo "Already paired and connected. On your Mac type: imlegit   (to pair a different Mac: 'bash install.sh remove' here, then run again)"; return 0
   fi
+  command -v ss >/dev/null && ss -ltn | grep -E ":($TP|$CDP)\b" && die "tunnel port $TP or $CDP is busy on this server"
+  # sshd must allow reverse forwards (readable as root only; skipped if we can't read it)
+  if /usr/sbin/sshd -T 2>/dev/null | grep -qiE '^allowtcpforwarding (no|local)'; then die "sshd has AllowTcpForwarding disabled; set it to yes in sshd_config"; fi
   mkdir -p ~/.ssh ~/.claude; chmod 700 ~/.ssh; touch ~/.ssh/authorized_keys ~/.ssh/config ~/.claude/CLAUDE.md; chmod 600 ~/.ssh/authorized_keys
+  # not connected = a new pairing: forget any previous Mac so a fresh token can register a new one
+  rm -f ~/.ssh/cmb_macuser ~/.ssh/cmb_login_pub ~/.ssh/cmb_known_hosts; "${GNUSED[@]}" "/# cmb-login/d" ~/.ssh/authorized_keys
   [ -f ~/.ssh/cmb_tunnel ] || ssh-keygen -q -t ed25519 -N "" -f ~/.ssh/cmb_tunnel -C claude-mac-bridge
   [ -f ~/.ssh/cmb_to_mac ] || ssh-keygen -q -t ed25519 -N "" -f ~/.ssh/cmb_to_mac -C claude-bridge
   # The only thing the tunnel key may run is this script: it records the Mac's username
@@ -77,7 +84,7 @@ u=${c%% *}; k=${c#* }
 case "$u" in ""|*[!a-zA-Z0-9._-]*) exit 1;; esac
 case "$k" in "ssh-ed25519 "*) ;; *) exit 1;; esac
 b=${k#ssh-ed25519 }; case "$b" in ""|*[!A-Za-z0-9+/=]*) exit 1;; esac
-if [ -s "$d/cmb_macuser" ]; then [ "$(cat "$d/cmb_macuser")" = "$u" ] && [ "$(cat "$d/cmb_login_pub")" = "$k" ] || exit 1; fi
+if [ -s "$d/cmb_macuser" ] && [ -s "$d/cmb_login_pub" ]; then [ "$(cat "$d/cmb_macuser")" = "$u" ] && [ "$(cat "$d/cmb_login_pub")" = "$k" ] || exit 1; fi
 echo "$u" > "$d/cmb_macuser"; echo "$k" > "$d/cmb_login_pub"
 grep -qF "$b" "$d/authorized_keys" || echo "$k imlegit-login # cmb-login" >> "$d/authorized_keys"
 sed -i "/# claude-mac-bridge\$/,/# claude-mac-bridge-end/ s/^  User .*/  User $u/" "$d/config"
@@ -101,11 +108,14 @@ START
   # auto-detect how the Mac reaches this server: the address/port of the SSH session we are in
   HOST=${CMB_HOST:-$(echo "${SSH_CONNECTION:-}" | awk '{print $3}')}; SPORT=${CMB_PORT:-$(echo "${SSH_CONNECTION:-}" | awk '{print $4}')}
   [ -n "$HOST" ] || HOST=$(curl -4fs -m3 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
+  [ -n "$SPORT" ] || SPORT=$(ss -ltnp 2>/dev/null | awk '/sshd/{n=split($4,a,":"); print a[n]; exit}')
   SPORT=${SPORT:-22}; MACUSER=$(cat ~/.ssh/cmb_macuser 2>/dev/null || echo unknown)
   echo "server address for the token: $HOST:$SPORT"
 
   "${GNUSED[@]}" "/$MARK/,/$MARK-end/d" ~/.ssh/config ~/.claude/CLAUDE.md
-  cat >> ~/.ssh/config <<EOF
+  # our block goes FIRST: ssh uses the first value it finds, so an older `Host mac` of yours can't shadow it
+  cp ~/.ssh/config ~/.ssh/cmb_config.old
+  cat > ~/.ssh/config <<EOF
 $MARK
 Host mac
   HostName localhost
@@ -113,6 +123,7 @@ Host mac
   User $MACUSER
   IdentityFile ~/.ssh/cmb_to_mac
   IdentitiesOnly yes
+  UserKnownHostsFile ~/.ssh/cmb_known_hosts
   StrictHostKeyChecking accept-new
   ServerAliveInterval 30
   ControlMaster auto
@@ -120,6 +131,7 @@ Host mac
   ControlPersist 10m
 $MARK-end
 EOF
+  cat ~/.ssh/cmb_config.old >> ~/.ssh/config; rm -f ~/.ssh/cmb_config.old; chmod 600 ~/.ssh/config
   cat >> ~/.claude/CLAUDE.md <<EOF
 $MARK
 # The user's Mac
@@ -129,7 +141,7 @@ Mac Chrome DevTools (CDP) is on localhost:$CDP here when Chrome runs with --remo
 $MARK-end
 EOF
 
-  HK=$(awk '{print $1" "$2}' /etc/ssh/ssh_host_ed25519_key.pub 2>/dev/null || true)
+  HK=""; for t in ed25519 ecdsa rsa; do [ -r /etc/ssh/ssh_host_${t}_key.pub ] && { HK=$(awk '{print $1" "$2}' /etc/ssh/ssh_host_${t}_key.pub); break; }; done
   TOKEN="cmb1.$(printf '%s\n' "$HOST" "$SPORT" "$(id -un)" "$HK" "$(cut -d' ' -f1,2 ~/.ssh/cmb_to_mac.pub)" "$(grep -v -- ----- ~/.ssh/cmb_tunnel | tr -d '\n')" | base64 | tr -d '\n')"
   printf '\n=== PAIRING TOKEN (secret; paste on your Mac) ===\n%s\n\nOn the Mac run the same one-liner and paste the token.\n\nWaiting for the Mac (Ctrl-C to stop; re-run any time)...\n' "$TOKEN"
   for _ in $(seq 120); do
@@ -142,6 +154,9 @@ EOF
 mac() {
   [ "$OS" = Darwin ] || die "run this step on the Mac"
   TOKEN=${1:-}; [ -n "$TOKEN" ] || ask "Paste the token from the server: " TOKEN
+  # tolerate a pasted banner, wrapped lines or stray spaces: pull out just the token
+  TOKEN=$(printf '%s\n' "$TOKEN" | tr -d ' \r' | awk 'f==0 && /cmb1\./ {sub(/.*cmb1\./,"cmb1."); t=$0; f=1; next} f==1 && /^[A-Za-z0-9+\/=]+$/ {t=t $0; next} f==1 {exit} END{print t}')
+  [ -n "$TOKEN" ] || die "no token found in what you pasted (it starts with cmb1.)"
   D=$(printf %s "${TOKEN#cmb1.}" | b64d 2>/dev/null) || die "bad token"
   host=$(echo "$D" | sed -n 1p); port=$(echo "$D" | sed -n 2p); suser=$(echo "$D" | sed -n 3p)
   hk=$(echo "$D" | sed -n 4p); spub=$(echo "$D" | sed -n 5p); priv=$(echo "$D" | sed -n 6p)
@@ -155,6 +170,7 @@ mac() {
   mkdir -p ~/.ssh "$HOME/Library/LaunchAgents"; touch ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys
   (umask 077; printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\n%s\n-----END OPENSSH PRIVATE KEY-----\n' "$(echo "$priv" | fold -w70)" > "$K")
   STRICT=accept-new; : > "$KH"
+  [ -n "$hk" ] || echo "WARNING: server host key not in the token; first connection is trusted without verification."
   if [ -n "$hk" ]; then STRICT=yes; [ "$port" = 22 ] && echo "$host $hk" > "$KH" || echo "[$host]:$port $hk" > "$KH"; fi
   # the server's key may log in here only through the tunnel (arrives from loopback)
   "${GNUSED[@]}" "/$MARK/d" ~/.ssh/authorized_keys
@@ -175,7 +191,8 @@ B=\$(printf %s "\$PWD" | base64 | tr -d '\n')
 exec caffeinate -i ssh -t -i $LK -o IdentitiesOnly=yes -o UserKnownHostsFile=$KH -o StrictHostKeyChecking=$STRICT -o ServerAliveInterval=30 -p $port $suser@$host "~/.ssh/cmb_start \$B\$(printf ' %q' "\$@")"
 EOF
   chmod +x ~/.local/bin/imlegit
-  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo "export PATH=\"\$HOME/.local/bin:\$PATH\" $MARK" >> ~/.zshrc; NEWPATH=1;; esac
+  RC=~/.zshrc; case "${SHELL:-}" in *bash) RC=~/.bash_profile;; esac
+  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) grep -qF "$MARK" "$RC" 2>/dev/null || echo "export PATH=\"\$HOME/.local/bin:\$PATH\" $MARK" >> "$RC"; NEWPATH=1;; esac
   cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -193,13 +210,18 @@ EOF
   for _ in $(seq 12); do
     sleep 3
     ssh -i "$LK" -o IdentitiesOnly=yes -o UserKnownHostsFile="$KH" -o StrictHostKeyChecking=$STRICT -o BatchMode=yes -o ConnectTimeout=5 -p "$port" "$suser@$host" 'ssh -o BatchMode=yes -o ConnectTimeout=5 mac true' 2>/dev/null && {
-      echo "Ready. In a new terminal (or after: source ~/.zshrc) type:  imlegit"; [ $NEWPATH = 1 ] && echo "(added ~/.local/bin to PATH in ~/.zshrc)"; return; }
+      echo "Ready. In a new terminal (or after: source $RC) type:  imlegit"; [ $NEWPATH = 1 ] && echo "(added ~/.local/bin to PATH in $RC)"; return; }
   done
-  echo "Not connected yet; check /tmp/claude-mac-bridge.log and re-run."; exit 1
+  echo "Not connected. Likely causes:"
+  echo " - this token was already used by another pairing: run the server step again for a fresh token"
+  echo " - Remote Login is limited to certain users (System Settings > Sharing > Remote Login > allow your user)"
+  echo " - the server's sshd blocks port forwarding or the tunnel ports are busy"
+  echo "Log: /tmp/claude-mac-bridge.log"; exit 1
 }
 
 history() {
   [ $# -ge 2 ] || die "usage: install.sh history MACPATH SERVERPATH"
+  command -v rsync >/dev/null || die "rsync is not installed on this server (apt install rsync)"
   cfg=${CMB_MAC_CONFIG:-.claude}
   rsync -au --mkpath mac:"$cfg/projects/$(enc "$1")/" "$HOME/.claude/projects/$(enc "$2")/" 2>/dev/null \
     || { mkdir -p "$HOME/.claude/projects/$(enc "$2")"; rsync -au mac:"$cfg/projects/$(enc "$1")/" "$HOME/.claude/projects/$(enc "$2")/"; }
@@ -211,10 +233,25 @@ mount_mac() {
   mkdir -p ~/mac; sshfs -o reconnect,ServerAliveInterval=15 "mac:" ~/mac && echo "mounted ~/mac"
 }
 
+# Optional: let the server's Claude run `ssh mac ...` without asking each time. Opt-in because it means
+# unattended command execution on your Mac.
+allow() {
+  command -v python3 >/dev/null || die "python3 needed"
+  mkdir -p ~/.claude; python3 - <<'PY'
+import json, os
+p = os.path.expanduser("~/.claude/settings.json")
+s = json.load(open(p)) if os.path.exists(p) else {}
+a = s.setdefault("permissions", {}).setdefault("allow", [])
+if "Bash(ssh mac:*)" not in a: a.append("Bash(ssh mac:*)")
+json.dump(s, open(p, "w"), indent=2)
+PY
+  echo "allowed: Claude on this server can now run 'ssh mac ...' without prompting (undo: remove it from ~/.claude/settings.json)"
+}
+
 remove() {
   if [ "$OS" = Darwin ]; then
     launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.claude-mac-bridge.plist 2>/dev/null || true
-    rm -f ~/Library/LaunchAgents/com.claude-mac-bridge.plist ~/.ssh/cmb_* ~/.local/bin/imlegit; "${GNUSED[@]}" "/$MARK/d" ~/.zshrc 2>/dev/null || true
+    rm -f ~/Library/LaunchAgents/com.claude-mac-bridge.plist ~/.ssh/cmb_* ~/.local/bin/imlegit; "${GNUSED[@]}" "/$MARK/d" ~/.zshrc ~/.bash_profile 2>/dev/null || true
     "${GNUSED[@]}" "/$MARK/d" ~/.ssh/authorized_keys 2>/dev/null || true
   else
     fusermount -u ~/mac 2>/dev/null || true; rmdir ~/mac 2>/dev/null || true
@@ -229,6 +266,7 @@ case "${1:-}" in
   -h|--help|help) guide;;
   history) shift; history "$@";;
   mount) mount_mac;;
+  allow) allow;;
   remove|uninstall|--uninstall) remove;;
   *) if [ "$OS" = Darwin ]; then mac "${1:-}"; else server; fi;;
 esac
