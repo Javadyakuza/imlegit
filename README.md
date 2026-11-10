@@ -23,7 +23,7 @@ imlegit                 # in any Mac terminal: opens Claude Code on the server
 imlegit --resume        # arguments go to claude
 ```
 - First run only: `/login` with your subscription (on the server).
-- Claude is told your current Mac directory, and reaches the Mac with `ssh mac '<cmd>'`.
+- Everything runs **on the server** by default ("my ip" is the server's). Claude touches your Mac only when you explicitly ask ("on my Mac", "my laptop"), via `ssh mac '<cmd>'`.
 - Each `imlegit` is its own session, all sharing one tunnel. The Mac stays awake while a session is open (`caffeinate`).
 - If the terminal closes or the network drops, the session ends; continue with `imlegit --resume`.
 
@@ -67,7 +67,7 @@ bash install.sh remove                                 # undo everything; run on
 
 ## Handled automatically
 
-- Re-running the server step while connected changes nothing ("already paired"); when not connected it issues a fresh token, so re-pairing a wiped or different Mac just works.
+- Re-running the server step while connected keeps the connection and just refreshes Claude's instructions; when not connected it issues a fresh token, so re-pairing a wiped or different Mac just works.
 - A token pasted with its banner, or wrapped over several lines, is cleaned up.
 - Your own `Host mac` in the server's `~/.ssh/config` can't shadow ours (our block goes first); the Mac's host key lives in its own known-hosts file, so a different Mac never trips a host-key warning.
 - Server address and SSH port come from your current SSH session (or the listening sshd); the host key pinned is ed25519, ecdsa or rsa, whichever exists.

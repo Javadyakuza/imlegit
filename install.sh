@@ -62,15 +62,13 @@ server() {
   fi
   for t in ssh ssh-keygen base64 awk sed; do command -v "$t" >/dev/null || die "missing tool on server: $t"; done
   # already paired and live: nothing to do (re-running must not break a working setup)
-  if ssh -o BatchMode=yes -o ConnectTimeout=3 mac true 2>/dev/null; then
-    echo "Already paired and connected. On your Mac type: imlegit   (to pair a different Mac: 'bash install.sh remove' here, then run again)"; return 0
-  fi
-  command -v ss >/dev/null && ss -ltn | grep -E ":($TP|$CDP)\b" && die "tunnel port $TP or $CDP is busy on this server"
+  PAIRED=0; ssh -o BatchMode=yes -o ConnectTimeout=3 mac true 2>/dev/null && PAIRED=1
+  [ $PAIRED = 1 ] || { command -v ss >/dev/null && ss -ltn | grep -E ":($TP|$CDP)\b" && die "tunnel port $TP or $CDP is busy on this server"; }
   # sshd must allow reverse forwards (readable as root only; skipped if we can't read it)
   if /usr/sbin/sshd -T 2>/dev/null | grep -qiE '^allowtcpforwarding (no|local)'; then die "sshd has AllowTcpForwarding disabled; set it to yes in sshd_config"; fi
   mkdir -p ~/.ssh ~/.claude; chmod 700 ~/.ssh; touch ~/.ssh/authorized_keys ~/.ssh/config ~/.claude/CLAUDE.md; chmod 600 ~/.ssh/authorized_keys
   # not connected = a new pairing: forget any previous Mac so a fresh token can register a new one
-  rm -f ~/.ssh/cmb_macuser ~/.ssh/cmb_login_pub ~/.ssh/cmb_known_hosts; "${GNUSED[@]}" "/# cmb-login/d" ~/.ssh/authorized_keys
+  [ $PAIRED = 1 ] || { rm -f ~/.ssh/cmb_macuser ~/.ssh/cmb_login_pub ~/.ssh/cmb_known_hosts; "${GNUSED[@]}" "/# cmb-login/d" ~/.ssh/authorized_keys; }
   [ -f ~/.ssh/cmb_tunnel ] || ssh-keygen -q -t ed25519 -N "" -f ~/.ssh/cmb_tunnel -C claude-mac-bridge
   [ -f ~/.ssh/cmb_to_mac ] || ssh-keygen -q -t ed25519 -N "" -f ~/.ssh/cmb_to_mac -C claude-bridge
   # The only thing the tunnel key may run is this script: it records the Mac's username
@@ -99,7 +97,7 @@ export PATH="$HOME/.local/bin:$PATH"
 cwd=$(printf %s "$1" | base64 -d); shift
 command -v claude >/dev/null || { echo "Claude Code is not installed on this server. Install it: curl -fsSL https://claude.ai/install.sh | bash"; exit 1; }
 cd "$HOME/imlegit"
-exec claude --append-system-prompt "The user started you from their Mac (working dir: $cwd). You run on a remote server; the Mac is reachable with 'ssh mac' (see ~/.claude/CLAUDE.md)." "$@"
+exec claude --append-system-prompt "You run on a remote server: execute everything here. Use 'ssh mac' only if the user explicitly asks for their Mac. For reference only (ignore unless they ask about their Mac), they launched you from Mac dir: $cwd." "$@"
 START
   chmod 700 ~/.ssh/cmb_start
   "${GNUSED[@]}" "/$MARK/d" ~/.ssh/authorized_keys
@@ -134,12 +132,16 @@ EOF
   cat ~/.ssh/cmb_config.old >> ~/.ssh/config; rm -f ~/.ssh/cmb_config.old; chmod 600 ~/.ssh/config
   cat >> ~/.claude/CLAUDE.md <<EOF
 $MARK
-# The user's Mac
-Your own machine is a server. The user's Mac is reachable with \`ssh mac\` (reverse tunnel, may be offline).
-Run Mac commands as \`ssh mac '<cmd>'\`. Mac files: \`ssh mac cat/ls\`, or ~/mac if mounted.
-Mac Chrome DevTools (CDP) is on localhost:$CDP here when Chrome runs with --remote-debugging-port=$CDP.
+# Where things run
+You run on a remote server. Do EVERYTHING on this server by default: run commands, read and write files,
+and treat "my ip", "my files", "this machine" as this server.
+The user's Mac is reachable with \`ssh mac\` (reverse tunnel, may be offline) but use it ONLY when the user
+explicitly asks for their Mac (e.g. "on my Mac", "my laptop", "my local machine"). Never run \`ssh mac\` otherwise.
+When asked: \`ssh mac '<cmd>'\`; Mac files via \`ssh mac cat/ls\` (or ~/mac if mounted); Mac Chrome DevTools is
+on localhost:$CDP here when Chrome runs with --remote-debugging-port=$CDP.
 $MARK-end
 EOF
+  if [ $PAIRED = 1 ]; then echo "Already paired and connected; instructions refreshed. On your Mac type: imlegit   (to pair a different Mac: 'bash install.sh remove' here, then run again)"; return 0; fi
 
   HK=""; for t in ed25519 ecdsa rsa; do [ -r /etc/ssh/ssh_host_${t}_key.pub ] && { HK=$(awk '{print $1" "$2}' /etc/ssh/ssh_host_${t}_key.pub); break; }; done
   TOKEN="cmb1.$(printf '%s\n' "$HOST" "$SPORT" "$(id -un)" "$HK" "$(cut -d' ' -f1,2 ~/.ssh/cmb_to_mac.pub)" "$(grep -v -- ----- ~/.ssh/cmb_tunnel | tr -d '\n')" | base64 | tr -d '\n')"
