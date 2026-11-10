@@ -21,9 +21,10 @@ Paste the token. The Mac checks the whole loop itself and prints `Ready`; the se
 ```bash
 imlegit                 # in any Mac terminal: opens Claude Code on the server
 imlegit --resume        # arguments go to claude
+imlegit --mac           # this session may also work on your Mac, as a remote machine (`ssh mac`)
 ```
 - First run only: `/login` with your subscription (on the server).
-- Everything runs **on the server** by default ("my ip" is the server's). Claude touches your Mac only when you explicitly ask ("on my Mac", "my laptop"), via `ssh mac '<cmd>'`.
+- Plain `imlegit`: everything runs **on the server** and Claude knows nothing about your Mac (nothing is written to `~/.claude/CLAUDE.md`). `imlegit --mac` tells that one session that `ssh mac` is your Mac, a remote machine it can work on.
 - Each `imlegit` is its own session, all sharing one tunnel. The Mac stays awake while a session is open (`caffeinate`).
 - If the terminal closes or the network drops, the session ends; continue with `imlegit --resume`.
 
@@ -41,7 +42,6 @@ imlegit --resume        # arguments go to claude
 ```
 - The **Mac dials out** (launchd-managed), so it works behind NAT with no open ports and reconnects after sleep.
 - `ssh mac` from the server is multiplexed (`ControlMaster`): many sessions, one connection.
-- The server's `~/.claude/CLAUDE.md` tells Claude that `ssh mac` is your local machine.
 
 ## The token and keys
 
@@ -51,9 +51,13 @@ imlegit --resume        # arguments go to claude
 - The server's key is accepted on your Mac only from 127.0.0.1 (through the tunnel).
 - Anyone with root on the server can reach your Mac through the tunnel. Use servers you trust.
 
+## What the server can do on your Mac
+
+Anything your Mac user can do over SSH: run commands, read/write/delete the files that user can, reach Chrome DevTools on :9222. Not root (unless you have passwordless sudo), no GUI or screen control. macOS may block protected folders (Desktop, Documents...) for SSH unless you grant Full Disk Access. Claude treats it like any remote host it logs into with `ssh mac '<cmd>'`: no native file tools, and every command is a fresh shell.
+
 ## Small servers
 
-The server step refuses under 150MB free RAM or 50MB free disk, warns under 600MB (a Claude session needs a few hundred MB), and checks the tunnel ports are free. Footprint: one idle `ssh` and one `sleep` process plus edits to `~/.ssh/{config,authorized_keys,cmb_*}`, `~/.claude/CLAUDE.md` and a `~/imlegit` folder.
+The server step refuses under 150MB free RAM or 50MB free disk, warns under 600MB (a Claude session needs a few hundred MB), and checks the tunnel ports are free. Footprint: one idle `ssh` and one `sleep` process plus edits to `~/.ssh/{config,authorized_keys,cmb_*}`, and a `~/imlegit` folder.
 
 ## Other commands
 
