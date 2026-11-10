@@ -133,12 +133,9 @@ EOF
   cat >> ~/.claude/CLAUDE.md <<EOF
 $MARK
 # Where things run
-You run on a remote server. Do EVERYTHING on this server by default: run commands, read and write files,
-and treat "my ip", "my files", "this machine" as this server.
-The user's Mac is reachable with \`ssh mac\` (reverse tunnel, may be offline) but use it ONLY when the user
-explicitly asks for their Mac (e.g. "on my Mac", "my laptop", "my local machine"). Never run \`ssh mac\` otherwise.
-When asked: \`ssh mac '<cmd>'\`; Mac files via \`ssh mac cat/ls\` (or ~/mac if mounted); Mac Chrome DevTools is
-on localhost:$CDP here when Chrome runs with --remote-debugging-port=$CDP.
+You run on this remote server. Do everything here; "my ip", "my files" mean this server.
+\`ssh mac\` reaches the user's Mac. Use it only if the user explicitly names their Mac; otherwise never use it
+and never mention it. (Mac Chrome DevTools: localhost:$CDP.)
 $MARK-end
 EOF
   if [ $PAIRED = 1 ]; then echo "Already paired and connected; instructions refreshed. On your Mac type: imlegit   (to pair a different Mac: 'bash install.sh remove' here, then run again)"; return 0; fi
