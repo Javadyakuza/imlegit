@@ -86,4 +86,8 @@ bash install.sh remove                                 # undo everything; run on
 - Chrome control needs Chrome started with `--remote-debugging-port=9222`. Screen control is not bridged.
 - Mac client only. Server: Linux with OpenSSH 7.8+.
 
+## Terms
+
+imlegit is a remote-development helper. It does not change or hide where you use Claude from. You are responsible for following Anthropic's terms of service, usage policy and supported-regions policy, and for using servers you trust. No warranty (see LICENSE).
+
 MIT
