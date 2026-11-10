@@ -94,10 +94,10 @@ HELLO
   cat > ~/.ssh/cmb_start <<'START'
 #!/bin/bash
 export PATH="$HOME/.local/bin:$PATH"
-cwd=$(printf %s "$1" | base64 -d); shift
+shift  # first arg is the Mac's cwd, sent by older `imlegit` launchers; unused (instructions live in ~/.claude/CLAUDE.md)
 command -v claude >/dev/null || { echo "Claude Code is not installed on this server. Install it: curl -fsSL https://claude.ai/install.sh | bash"; exit 1; }
 cd "$HOME/imlegit"
-exec claude --append-system-prompt "You run on a remote server: execute everything here. Use 'ssh mac' only if the user explicitly asks for their Mac. For reference only (ignore unless they ask about their Mac), they launched you from Mac dir: $cwd." "$@"
+exec claude "$@"
 START
   chmod 700 ~/.ssh/cmb_start
   "${GNUSED[@]}" "/$MARK/d" ~/.ssh/authorized_keys
