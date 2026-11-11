@@ -1,33 +1,40 @@
 # imlegit
 
-Type `imlegit` in your Mac terminal and get **Claude Code running on your server** (your subscription lives there), working on **your Mac** through a private tunnel: its shell, files and Chrome. Open as many sessions as you like.
+Type `imlegit` in your terminal and get **Claude Code running on your server** (your subscription lives there), working on **your computer** (macOS, Linux, or Windows via WSL) through a private tunnel: its shell, files, Claude sessions and Chrome. Open as many sessions as you like. (The computer is called `mac` on the server, whatever its OS.)
 
-## Install: two commands, one token
+## Install: same one-liner on both machines, one token
 
-**1. On the server** (the script installs Claude Code there if missing):
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Javadyakuza/imlegit/main/install.sh)
 ```
-It prints a **pairing token** and waits. Nothing to type, nothing to configure.
+It opens an **interactive menu** (on Linux it first asks: server or your computer?).
 
-**2. On your Mac** (System Settings > General > Sharing > **Remote Login = ON**):
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Javadyakuza/imlegit/main/install.sh)
-```
-Paste the token. The Mac checks the whole loop itself and prints `Ready`; the server terminal prints `connected`.
+1. **Server** (Linux): choose *Pair a computer*. It installs Claude Code if missing, prints a **pairing token** and waits.
+2. **Your computer**: choose *Pair with a server* and paste the token. It prints `Ready`.
+   - macOS: System Settings > General > Sharing > **Remote Login = ON**.
+   - Linux / WSL: needs an SSH server; the script offers to install `openssh-server` with sudo.
+   - Windows: install WSL (`wsl --install` in PowerShell), open Ubuntu, and run the one-liner there.
+
+Later, open the menu again with `imlegit --setup` (your computer) or `imlegit` (server). No commands to remember.
 
 ## Use
 
-```bash
-imlegit                 # in any Mac terminal: opens Claude Code on the server
-imlegit --resume        # arguments go to claude
-imlegit --no-mac        # this session runs on the server only and is not told about your Mac
-```
+| On your computer | What it does |
+|---|---|
+| `imlegit` | Claude Code on the server; it can work on your computer via `ssh mac` |
+| `imlegit --resume [ID]` | Resume a session. Your computer's sessions for the **current folder** (or that **ID**) are copied to the server first, so a local session continues there |
+| `imlegit --continue` / `-c` | Continue the latest session of the current folder (local ones included) |
+| `imlegit --no-mac` | Server only; this session isn't told about your computer (no copying either) |
+| `imlegit --shell` | A login shell on the server instead of Claude (`ssh mac` works there too) |
+| `imlegit --setup` | Menu: start, shell, pair, restart bridge, update, toggle permissions, uninstall |
+| anything else | Passed to `claude` (e.g. `imlegit --model opus`) |
+
 - First run only: `/login` with your subscription (on the server).
-- Plain `imlegit`: Claude runs **on the server** and knows `ssh mac` is your Mac (files, Mac Claude history in `~/.claude`, Chrome on 9222). Nothing is written to `~/.claude/CLAUDE.md`; it is per session. `--no-mac` leaves the Mac out.
-- Mac Desktop/Documents/Downloads need: System Settings > Sharing > Remote Login (i) > "Allow full disk access for remote users".
-- Each `imlegit` is its own session, all sharing one tunnel. The Mac stays awake while a session is open (`caffeinate`).
-- If the terminal closes or the network drops, the session ends; continue with `imlegit --resume`.
+- Claude is told the folder your terminal is in, and that paths in resumed local sessions live on your computer.
+- macOS Desktop/Documents/Downloads need: System Settings > Sharing > Remote Login (i) > "Allow full disk access for remote users".
+- Each `imlegit` is its own session, all sharing one tunnel. Your computer stays awake while a session is open (`caffeinate` on macOS, `systemd-inhibit` on Linux).
+- If the terminal closes or the network drops, the session ends; continue with `imlegit -c`.
+- Copied sessions keep the newer version: one you continued on the server isn't overwritten by an older local copy.
 
 ## Architecture
 
@@ -60,15 +67,20 @@ Anything your Mac user can do over SSH: run commands, read/write/delete the file
 
 The server step refuses under 150MB free RAM or 50MB free disk, warns under 600MB (a Claude session needs a few hundred MB), and checks the tunnel ports are free. Footprint: one idle `ssh` and one `sleep` process plus edits to `~/.ssh/{config,authorized_keys,cmb_*}`, and a `~/imlegit` folder.
 
-## Other commands
+## Script commands (everything the menu does, for scripting)
 
 ```bash
-bash install.sh history /Users/me/proj /home/me/proj   # (server) pull a Mac project's Claude sessions
-bash install.sh mount                                  # (server) Mac home at ~/mac via sshfs
-bash install.sh allow                                  # (server) let Claude run `ssh mac ...` without prompting (opt-in)
-bash install.sh remove                                 # undo everything; run on each machine
+bash install.sh                  # menu
+bash install.sh server           # (server) pair: print a token and wait; refreshes if already paired
+bash install.sh pair [TOKEN]     # (computer) pair with a server
+bash install.sh update           # download the latest; on your computer also updates the server
+bash install.sh allow on|off|toggle            # (server) Claude may run `ssh mac ...` without asking
+bash install.sh pull id SESSION_ID             # (server) copy one session from your computer
+bash install.sh pull dir /Users/me/proj [SRV]  # (server) copy a project's sessions (alias: history)
+bash install.sh mount            # (server) your computer's home at ~/mac via sshfs
+bash install.sh remove           # undo everything on this machine (the menu does both machines)
 ```
-`CMB_HOST` / `CMB_PORT` override the auto-detected server address; `CMB_MAC_CONFIG` for a non-default Mac config dir with `history`.
+Env: `CMB_HOST` / `CMB_PORT` override the auto-detected server address; `CMB_MAC_CONFIG` = Claude's config dir under your computer's home (default `.claude`); `IMLEGIT_URL` = update source.
 
 ## Handled automatically
 
@@ -81,11 +93,12 @@ bash install.sh remove                                 # undo everything; run on
 
 ## Limits
 
-- One Mac per server (fixed loopback ports 2222/9222).
-- Mac asleep or offline: `imlegit` still opens, but Mac commands fail until it's back.
-- The server edits Mac files through `ssh mac`, not Claude's native file tools, unless you use `mount` (needs sshfs).
+- One computer per server (fixed loopback ports 2222/9222). *Pair a NEW computer* revokes the old one.
+- Computer asleep or offline: `imlegit` still opens, but its commands fail until it's back.
+- The server edits your files through `ssh mac`, not Claude's native file tools, unless you use `mount` (needs sshfs).
 - Chrome control needs Chrome started with `--remote-debugging-port=9222`. Screen control is not bridged.
-- Mac client only. Server: Linux with OpenSSH 7.8+.
+- Clients: macOS, Linux (systemd user service, or a background loop without systemd), Windows via WSL (the bridge runs while WSL runs; Windows files are under `/mnt/c`). Native Windows shells are not supported. Server: Linux with OpenSSH 7.8+.
+- Installs made before the menu existed: pair once more (server menu > *Pair a NEW computer*).
 
 ## Terms
 
