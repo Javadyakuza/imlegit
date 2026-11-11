@@ -97,8 +97,8 @@ export PATH="$HOME/.local/bin:$PATH"
 shift  # first arg is the Mac's cwd, sent by the `imlegit` launcher; unused
 command -v claude >/dev/null || { echo "Claude Code is not installed on this server. Install it: curl -fsSL https://claude.ai/install.sh | bash"; exit 1; }
 cd "$HOME/imlegit"
-# `imlegit --mac` = tell THIS session (only) that the user's Mac is a remote machine it can work on
-m=0; a=(); for x in "$@"; do if [ "$x" = --mac ]; then m=1; else a+=("$x"); fi; done
+# by default the session is told the user's Mac is a remote machine it can work on; `imlegit --no-mac` = server only
+m=1; a=(); for x in "$@"; do case "$x" in --no-mac) m=0;; --mac) ;; *) a+=("$x");; esac; done
 if [ $m = 1 ]; then
   exec claude --append-system-prompt "You run on this server. The user's own Mac is also available as a remote machine: 'ssh mac' (passwordless, as the user; may be offline). Work on it when the request is about the Mac or its files, via ssh mac '<cmd>'. Each call is a fresh shell (cd does not persist): use absolute paths or 'cd dir && cmd'. Mac Chrome DevTools is on localhost:9222 when Chrome runs with --remote-debugging-port=9222. Everything else runs here on the server." "${a[@]}"
 fi
@@ -135,7 +135,7 @@ Host mac
 $MARK-end
 EOF
   cat ~/.ssh/cmb_config.old >> ~/.ssh/config; rm -f ~/.ssh/cmb_config.old; chmod 600 ~/.ssh/config
-  # Nothing is written to ~/.claude/CLAUDE.md: Claude only learns about the Mac in a session started with `imlegit --mac`.
+  # Nothing is written to ~/.claude/CLAUDE.md: each `imlegit` session is told about the Mac via its system prompt (`--no-mac` skips it).
   if [ $PAIRED = 1 ]; then echo "Already paired and connected; refreshed. On your Mac type: imlegit   (to pair a different Mac: 'bash install.sh remove' here, then run again)"; return 0; fi
 
   HK=""; for t in ed25519 ecdsa rsa; do [ -r /etc/ssh/ssh_host_${t}_key.pub ] && { HK=$(awk '{print $1" "$2}' /etc/ssh/ssh_host_${t}_key.pub); break; }; done

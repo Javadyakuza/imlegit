@@ -21,10 +21,11 @@ Paste the token. The Mac checks the whole loop itself and prints `Ready`; the se
 ```bash
 imlegit                 # in any Mac terminal: opens Claude Code on the server
 imlegit --resume        # arguments go to claude
-imlegit --mac           # this session may also work on your Mac, as a remote machine (`ssh mac`)
+imlegit --no-mac        # this session runs on the server only and is not told about your Mac
 ```
 - First run only: `/login` with your subscription (on the server).
-- Plain `imlegit`: everything runs **on the server** and Claude knows nothing about your Mac (nothing is written to `~/.claude/CLAUDE.md`). `imlegit --mac` tells that one session that `ssh mac` is your Mac, a remote machine it can work on.
+- Plain `imlegit`: Claude runs **on the server** and knows `ssh mac` is your Mac (files, Mac Claude history in `~/.claude`, Chrome on 9222). Nothing is written to `~/.claude/CLAUDE.md`; it is per session. `--no-mac` leaves the Mac out.
+- Mac Desktop/Documents/Downloads need: System Settings > Sharing > Remote Login (i) > "Allow full disk access for remote users".
 - Each `imlegit` is its own session, all sharing one tunnel. The Mac stays awake while a session is open (`caffeinate`).
 - If the terminal closes or the network drops, the session ends; continue with `imlegit --resume`.
 
