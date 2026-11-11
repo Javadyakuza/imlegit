@@ -26,6 +26,9 @@ Later, open the menu again with `kolood --setup` (your computer) or `kolood` (se
 | `kolood --continue` / `-c` | Continue the latest session of the current folder (local ones included) |
 | `kolood --no-remote` | Server only; this session isn't told about your computer (no copying either) |
 | `kolood --shell` | A login shell on the server instead of Claude (`ssh remote` works there too) |
+| `kolood --account NAME` | Run Claude with account NAME on the server (`default` = the usual `~/.claude`) |
+| `kolood account ...` | Manage Claude accounts on the server: `list`, `add [NAME]`, `login NAME`, `use NAME`, `remove NAME` |
+| `kolood -h` | Short kolood help, then `claude --help` |
 | `kolood --setup` | Menu: start, shell, pair, restart bridge, update, toggle permissions, uninstall |
 | anything else | Passed to `claude` (e.g. `kolood --model opus`) |
 
@@ -35,6 +38,10 @@ Later, open the menu again with `kolood --setup` (your computer) or `kolood` (se
 - Each `kolood` is its own session, all sharing one tunnel. Your computer stays awake while a session is open (`caffeinate` on macOS, `systemd-inhibit` on Linux).
 - If the terminal closes or the network drops, the session ends; continue with `kolood -c`.
 - Copied sessions keep the newer version: one you continued on the server isn't overwritten by an older local copy.
+
+## Accounts
+
+Several Claude logins can live on the server: `default` (the normal `~/.claude`) plus one config dir per extra account (`~/.config/kolood/accounts/NAME`, used via `CLAUDE_CONFIG_DIR`). `kolood account list` shows who is logged in and which is selected; `add [NAME]`, `login NAME` (opens Claude for `/login`), `use NAME` (server-wide default for new sessions), `remove NAME`. `kolood --account NAME` overrides the selection for one session. Manage from your computer (`kolood account ...`), on the server (`kolood account`), or via either menu (option 8).
 
 ## Architecture
 
@@ -75,6 +82,7 @@ bash install.sh server           # (server) pair: print a token and wait; refres
 bash install.sh pair [TOKEN]     # (computer) pair with a server
 bash install.sh update           # download the latest; on your computer also updates the server
 bash install.sh allow on|off|toggle            # (server) Claude may run `ssh remote ...` without asking
+bash install.sh account list|add [NAME]|login NAME|use NAME|remove NAME  # (server) Claude accounts
 bash install.sh pull id SESSION_ID             # (server) copy one session from your computer
 bash install.sh pull dir /Users/me/proj [SRV]  # (server) copy a project's sessions (alias: history)
 bash install.sh mount            # (server) your computer's home at ~/remote via sshfs

@@ -13,6 +13,7 @@ I=$HOME/.local/share/kolood/install.sh   # saved copy: menus, updates and sessio
 CONF=$HOME/.ssh/kolood_conf; LK=$HOME/.ssh/kolood_login; KH=$HOME/.ssh/kolood_known_hosts
 LOG=/tmp/kolood.log; UNIT=kolood-bridge.service
 PLIST=$HOME/Library/LaunchAgents/com.kolood.bridge.plist
+ACCTDIR=$HOME/.config/kolood/accounts   # Claude accounts on the server; "default" = ~/.claude
 ask() { read -r -p "$1" "$2" </dev/tty; }
 yes_no() { local a=""; ask "$1" a || return 1; case "$a" in [Yy]*) return 0;; *) return 1;; esac; }
 b64d() { base64 -d 2>/dev/null || base64 -D; }
@@ -37,16 +38,21 @@ SETUP  (or just `bash install.sh` for the interactive menu)
                                             the script offers to install it)
  Later: `kolood --setup` on your computer, `kolood` on the server opens the menu.
 
-IMLEGIT FLAGS (on your computer; everything else is passed to claude)
+KOLOOD FLAGS (on your computer; everything else is passed to claude)
  kolood                  Claude on the server; it can work on this computer (`ssh remote`)
  kolood --no-remote         server only; this session is not told about your computer
  kolood --resume [ID]    resume; your computer's sessions (this folder, or that ID)
  kolood --continue       are copied to the server first, so local sessions continue there
  kolood --shell          a login shell on the server instead of Claude
+ kolood --account NAME   Claude account NAME on the server (default = ~/.claude)
+ kolood -h               kolood help, then claude's own help (passed to the server)
  kolood --setup          the menu: start, pair, restart bridge, update, uninstall
+ kolood account list | add [NAME] | login NAME | use NAME | remove NAME
+                         several Claude logins on the server (`kolood account` = menu)
 
 SCRIPT COMMANDS: menu | server | pair [TOKEN] | refresh | update | allow on|off|toggle
  | pull dir PATH [SRVPATH] | pull id SESSION_ID | history PATH SRVPATH | mount | remove
+ | account list|add [NAME]|login NAME|use NAME|remove NAME
  Env: KOLOOD_HOST, KOLOOD_PORT (server address in the token), KOLOOD_REMOTE_CONFIG (dir under your
  home holding Claude's config on your computer, default .claude), KOLOOD_URL (update source).
 
@@ -132,8 +138,18 @@ HELLO
 export PATH="$HOME/.local/bin:$PATH"
 I="$HOME/.local/share/kolood/install.sh"
 cwd=$(printf %s "${1:-}" | base64 -d 2>/dev/null || true); shift
-m=1; sh=0; a=()
-for x in "$@"; do case "$x" in --no-remote|--no-mac) m=0;; --mac|--remote) ;; --shell) sh=1;; *) a+=("$x");; esac; done
+m=1; sh=0; acct=; a=()
+while [ $# -gt 0 ]; do case "$1" in
+  --no-remote|--no-mac) m=0;; --mac|--remote) ;; --shell) sh=1;;
+  --account) acct=$2; shift;; --account=*) acct=${1#--account=};;
+  *) a+=("$1");;
+esac; shift; done
+[ -n "$acct" ] || acct=$(cat "$HOME/.config/kolood/account" 2>/dev/null || true)
+if [ -n "$acct" ] && [ "$acct" != default ]; then
+  [[ "$acct" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || { echo "bad account name: $acct"; exit 1; }
+  [ -d "$HOME/.config/kolood/accounts/$acct" ] || { echo "No account $acct on the server. Accounts: kolood account list"; exit 1; }
+  export CLAUDE_CONFIG_DIR="$HOME/.config/kolood/accounts/$acct"
+fi
 mkdir -p "$HOME/workspace"; cd "$HOME/workspace"
 [ $sh = 1 ] && exec "${SHELL:-/bin/bash}" -l
 command -v claude >/dev/null || { echo "Claude Code is not installed on this server. Install it: curl -fsSL https://claude.ai/install.sh | bash"; exit 1; }
@@ -153,7 +169,7 @@ START
   chmod 700 ~/.ssh/kolood_start
   # `kolood` on the server opens the menu
   save_self; mkdir -p ~/.local/bin; L=$HOME/.local/bin/kolood
-  if [ ! -e "$L" ] || grep -qF "$MARK" "$L"; then printf '#!/bin/bash\n%s\nexec bash "$HOME/.local/share/kolood/install.sh" menu "$@"\n' "$MARK" > "$L"; chmod +x "$L"; fi
+  if [ ! -e "$L" ] || grep -qF "$MARK" "$L"; then printf '#!/bin/bash\n%s\nif [ $# = 0 ]; then exec bash "$HOME/.local/share/kolood/install.sh" menu; else exec bash "$HOME/.local/share/kolood/install.sh" "$@"; fi\n' "$MARK" > "$L"; chmod +x "$L"; fi
   add_path || true
   "${GNUSED[@]}" "/$MARK/d" ~/.ssh/authorized_keys
   echo "restrict,port-forwarding,permitlisten=\"127.0.0.1:$TP\",permitlisten=\"127.0.0.1:$CDP\",command=\"$HOME/.ssh/kolood_hello\" $(cut -d' ' -f1,2 ~/.ssh/kolood_tunnel.pub) $MARK" >> ~/.ssh/authorized_keys
@@ -216,7 +232,7 @@ pull() {
     *) die "usage: install.sh pull dir PATH [SERVERPATH] | pull id SESSION_ID [SERVERPATH]";;
   esac
   cfg=${KOLOOD_REMOTE_CONFIG:-.claude}; [[ "$cfg" =~ ^[A-Za-z0-9._/-]+$ ]] || die "bad KOLOOD_REMOTE_CONFIG"
-  mkdir -p "$dst"; d="$HOME/.claude/projects/$(enc "$(cd "$dst" && pwd -P)")"; mkdir -p "$d"
+  mkdir -p "$dst"; d="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(enc "$(cd "$dst" && pwd -P)")"; mkdir -p "$d"
   K=""; tar --help 2>&1 | grep -q keep-newer-files && K=--keep-newer-files   # a session continued here stays
   set +e
   ssh -o BatchMode=yes -o ConnectTimeout=5 remote sh -s -- "$mode" "$arg" "$cfg" <<'R' | tar -xf - -C "$d" $K 2>/dev/null
@@ -248,20 +264,87 @@ mount_remote() {
 # Opt-in: let the server's Claude run `ssh remote ...` without asking each time (unattended commands on your computer).
 allow() {
   command -v python3 >/dev/null || die "python3 needed"
-  mkdir -p ~/.claude; python3 - "${1:-on}" <<'PY'
+  mkdir -p ~/.claude
+  python3 - "${1:-on}" "$HOME/.claude" "$HOME"/.config/kolood/accounts/* <<'PY'
 import json, os, sys
-p = os.path.expanduser("~/.claude/settings.json"); r = "Bash(ssh remote:*)"
-s = json.load(open(p)) if os.path.exists(p) else {}
-a = s.setdefault("permissions", {}).setdefault("allow", [])
-m = sys.argv[1]
-if m == "status": print("on" if r in a else "off"); sys.exit()
+r = "Bash(ssh remote:*)"; p = "settings.json"; m = sys.argv[1]
+base = os.path.expanduser("~/.claude")
+dirs = [d for d in sys.argv[2:] if os.path.isdir(d)] or [base]
+s = json.load(open(os.path.join(base, p))) if os.path.exists(os.path.join(base, p)) else {}
+a = s.get("permissions", {}).get("allow", [])
 if m == "toggle": m = "off" if r in a else "on"
+if m == "status": print("on" if r in a else "off"); sys.exit()
 if m not in ("on", "off"): sys.exit("usage: allow on|off|toggle|status")
-if m == "on" and r not in a: a.append(r)
-if m == "off" and r in a: a.remove(r)
-json.dump(s, open(p, "w"), indent=2)
-print("Claude may run 'ssh remote ...' without asking: " + m)
+for d in dirs:
+    fp = os.path.join(d, p)
+    s = json.load(open(fp)) if os.path.exists(fp) else {}
+    a = s.setdefault("permissions", {}).setdefault("allow", [])
+    if m == "on" and r not in a: a.append(r)
+    if m == "off" and r in a: a.remove(r)
+    json.dump(s, open(fp, "w"), indent=2)
+print("Claude may run 'ssh remote ...' without asking: " + m + " (all accounts)")
 PY
+}
+
+acct_dir() { case "$1" in default) echo "$HOME/.claude";; *) echo "$ACCTDIR/$1";; esac; }
+# (server) multiple Claude accounts: "default" is plain ~/.claude; every other NAME is
+# $ACCTDIR/NAME used via CLAUDE_CONFIG_DIR; the selected name lives in ~/.config/kolood/account
+account() {
+  case "${1:-}" in
+    list)
+      sel=$(cat ~/.config/kolood/account 2>/dev/null || true); sel=${sel:-default}
+      for n in default $(ls "$ACCTDIR" 2>/dev/null); do
+        if [ -f "$(acct_dir "$n")/.credentials.json" ]; then s="logged in"; else s="not logged in"; fi
+        if [ "$n" = "$sel" ]; then echo "* $n: $s"; else echo "  $n: $s"; fi
+      done;;
+    add)
+      shift; n=${1:-}
+      if [ -z "$n" ]; then n=kolood; i=2; while [ -d "$(acct_dir "$n")" ]; do n=kolood$i; i=$((i+1)); done; fi
+      [ "$n" = default ] && die "'default' is the normal ~/.claude; pick another name"
+      [[ "$n" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || die "bad account name: $n (lowercase letters, digits, - or _; max 32)"
+      [ -d "$(acct_dir "$n")" ] && die "account $n already exists"
+      mkdir -p "$(acct_dir "$n")"; chmod 700 "$(acct_dir "$n")"
+      if { : </dev/tty; } 2>/dev/null; then run account login "$n"
+      else echo "created $n; log in with: kolood --account $n   (then /login)"; fi;;
+    login)
+      shift; n=${1:-}; [ -n "$n" ] || die "usage: install.sh account login NAME"
+      [ -d "$(acct_dir "$n")" ] || die "no account $n (see: kolood account list)"
+      mkdir -p "$HOME/workspace"; cd "$HOME/workspace"; export PATH="$HOME/.local/bin:$PATH"
+      echo "Log in with /login, then /exit."
+      if [ "$n" = default ]; then unset CLAUDE_CONFIG_DIR; else export CLAUDE_CONFIG_DIR=$(acct_dir "$n"); fi
+      claude;;
+    use)
+      shift; n=${1:-}; [ -n "$n" ] || die "usage: install.sh account use NAME"
+      [ "$n" = default ] || [ -d "$(acct_dir "$n")" ] || die "no account $n (see: kolood account list)"
+      if [ "$n" = default ]; then rm -f ~/.config/kolood/account
+      else mkdir -p ~/.config/kolood; echo "$n" > ~/.config/kolood/account; fi
+      echo "selected: $n";;
+    remove)
+      shift; n=${1:-}; [ "$n" = default ] && die "'default' cannot be removed"
+      [ -n "$n" ] || die "usage: install.sh account remove NAME"
+      [ -d "$(acct_dir "$n")" ] || die "no account $n (see: kolood account list)"
+      if [ "$(cat ~/.config/kolood/account 2>/dev/null || true)" = "$n" ]; then rm -f ~/.config/kolood/account; fi
+      rm -rf "$(acct_dir "$n")"
+      echo "removed account $n";;
+    ""|menu)
+      while :; do
+        echo; echo "== Claude accounts on this server =="
+        account list
+        echo " a) add   l) log in   u) use (make default)   r) remove   0) back"
+        c=""; ask "Choose: " c || return 0
+        n=""
+        case "$c" in
+          a) ask "Name (Enter = kolood, kolood2, ...): " n || true; run account add "$n";;
+          l) ask "Account: " n || true; run account login "$n";;
+          u) ask "Account: " n || true; run account use "$n";;
+          r) ask "Account: " n || true
+             if yes_no "Remove account $n? [y/N] "; then run account remove "$n"; fi;;
+          0) return 0;;
+          *) echo "Pick one of the letters above.";;
+        esac
+      done;;
+    *) die "usage: install.sh account list|add [NAME]|login NAME|use NAME|remove NAME";;
+  esac
 }
 
 # ---------------------------------------------------------------- your computer
@@ -381,11 +464,28 @@ EOF
 #!/bin/bash
 # kolood-bridge
 [ "${1:-}" = --setup ] && exec bash "$HOME/.local/share/kolood/install.sh" menu
+case "${1:-}" in -h|--help)
+  echo "kolood: Claude Code on your server, working on this computer"
+  echo "  kolood                      start Claude (in ~/workspace on the server)"
+  echo "  --resume [ID] / -c          resume; local sessions of this folder/ID are copied first"
+  echo "  --no-remote                 this session can't work on your computer"
+  echo "  --shell                     a login shell on the server instead of Claude"
+  echo "  --account NAME              Claude account NAME on the server"
+  echo "  --setup                     the kolood menu"
+  echo "  account list|add [NAME]|login NAME|use NAME|remove NAME"
+  echo "  -h                          this help; everything else is passed to claude"
+  echo "--- Claude Code options (passed through; run on the server) ---";;
+esac
 . "$HOME/.ssh/kolood_conf" 2>/dev/null || { echo "kolood is not paired yet: run  kolood --setup"; exit 1; }
+O=(-t -i "$HOME/.ssh/kolood_login" -o IdentitiesOnly=yes -o UserKnownHostsFile="$HOME/.ssh/kolood_known_hosts" -o StrictHostKeyChecking="$STRICT" -o ServerAliveInterval=30 -p "$port" "$suser@$host")
+if [ "${1:-}" = account ]; then
+  shift
+  exec ssh "${O[@]}" "bash ~/.local/share/kolood/install.sh account$(printf ' %q' "$@")"
+fi
 B=$(printf %s "$PWD" | base64 | tr -d '\n')
 W=(); if command -v caffeinate >/dev/null; then W=(caffeinate -i)
 elif command -v systemd-inhibit >/dev/null && systemd-inhibit --what=sleep --why=kolood true 2>/dev/null; then W=(systemd-inhibit --what=sleep --why=kolood); fi
-exec "${W[@]}" ssh -t -i "$HOME/.ssh/kolood_login" -o IdentitiesOnly=yes -o UserKnownHostsFile="$HOME/.ssh/kolood_known_hosts" -o StrictHostKeyChecking="$STRICT" -o ServerAliveInterval=30 -p "$port" "$suser@$host" "~/.ssh/kolood_start $B$(printf ' %q' "$@")"
+exec "${W[@]}" ssh "${O[@]}" "~/.ssh/kolood_start $B$(printf ' %q' "$@")"
 EOF
   chmod +x ~/.local/bin/kolood
   add_path && NEWPATH=1
@@ -453,7 +553,7 @@ remove() {
   if [ -f ~/.ssh/config ]; then "${GNUSED[@]}" "/$MARK/,/$MARK-end/d" ~/.ssh/config; fi
   if [ -f ~/.claude/CLAUDE.md ]; then "${GNUSED[@]}" "/$MARK/,/$MARK-end/d" ~/.claude/CLAUDE.md; fi
   pkill -u "$(id -u)" -f "sleep 2147483647" 2>/dev/null || true
-  rm -f ~/.ssh/kolood_*; rm -rf "${I%/*}"
+  rm -f ~/.ssh/kolood_*; rm -rf ~/.config/kolood "${I%/*}"
   echo "removed"
 }
 
@@ -472,6 +572,7 @@ client_menu() {
     echo " 5) Update kolood (here and on the server)"
     echo " 6) Toggle: Claude may run 'ssh remote' without asking"
     echo " 7) Uninstall (here and on the server)"
+    echo " 8) Accounts on the server (Claude logins)"
     echo " 0) Quit"
     c=""; ask "Choose: " c || exit 0
     case "$c" in
@@ -483,6 +584,8 @@ client_menu() {
       7) if yes_no "Remove kolood from this computer AND the server? [y/N] "; then
            if load_conf; then rrun remove || echo "Server not reachable: run 'bash install.sh remove' there."; fi
            remove; exit 0; fi;;
+      8) if [ -f "$CONF" ]; then ssh -t "${SRV[@]}" "bash ~/.local/share/kolood/install.sh account menu" </dev/tty || true
+         else echo "Pair first (3)."; fi;;
       0|q|Q) exit 0;;
       *) echo "Pick one of the numbers above.";;
     esac
@@ -493,6 +596,7 @@ server_menu() {
   while :; do
     echo; echo "== kolood: server =="
     if command -v claude >/dev/null 2>&1 || [ -x ~/.local/bin/claude ]; then echo -n "Claude: installed   "; else echo -n "Claude: NOT installed (1 offers it)   "; fi
+    sel=$(cat ~/.config/kolood/account 2>/dev/null || true); sel=${sel:-default}; echo -n "account: $sel   "
     if [ -s ~/.ssh/kolood_user ]; then
       if ssh -n -o BatchMode=yes -o ConnectTimeout=4 remote true 2>/dev/null; then echo "Paired with $(cat ~/.ssh/kolood_user): connected"
       else echo "Paired with $(cat ~/.ssh/kolood_user): not reachable now (asleep/offline?)"; fi
@@ -504,6 +608,7 @@ server_menu() {
     echo " 5) Mount your computer's home at ~/remote (sshfs)"
     echo " 6) Update kolood"
     echo " 7) Uninstall"
+    echo " 8) Accounts (Claude logins)"
     echo " 0) Quit"
     c=""; ask "Choose: " c || exit 0
     case "$c" in
@@ -515,6 +620,7 @@ server_menu() {
       5) run mount_remote;;
       6) run update;;
       7) if yes_no "Remove kolood from this server? [y/N] "; then remove; exit 0; fi;;
+      8) run account menu;;
       0|q|Q) exit 0;;
       *) echo "Pick one of the numbers above.";;
     esac
@@ -537,7 +643,7 @@ menu() {
 
 case "${1:-}" in
   -h|--help|help) guide;;
-  menu|setup) menu;;
+  menu|setup|--setup) menu;;
   server) server;;
   refresh) server refresh;;
   pair|client) client "${2:-}";;
@@ -545,6 +651,7 @@ case "${1:-}" in
   history) [ $# -ge 3 ] || die "usage: install.sh history PATH_ON_YOUR_COMPUTER SERVERPATH"; pull dir "$2" "$3";;
   mount) mount_remote;;
   allow) allow "${2:-on}";;
+  account) shift; account "$@";;
   update) update;;
   remove|uninstall|--uninstall) remove;;
   *kolood1.*) client "$1";;
