@@ -95,7 +95,11 @@ server() {
   # already paired and live: nothing to do (re-running must not break a working setup)
   PAIRED=0; ssh -n -o BatchMode=yes -o ConnectTimeout=3 remote true 2>/dev/null && PAIRED=1
   NEW=0; [ $PAIRED = 0 ] && [ $KEEP = 0 ] && NEW=1
-  if [ $NEW = 1 ] && command -v ss >/dev/null && ss -ltn | grep -E ":($TP|$CDP)\b"; then die "tunnel port $TP or $CDP is busy on this server"; fi
+  if [ $NEW = 1 ] && command -v ss >/dev/null; then
+    # a just-stopped tunnel (old install, or a computer that just went away) needs a few seconds to let go of its ports
+    for _ in $(seq 20); do ss -ltn | grep -qE ":($TP|$CDP)\b" || break; sleep 1; done
+    if ss -ltn | grep -E ":($TP|$CDP)\b"; then die "tunnel port $TP or $CDP is busy on this server (held by: $(ss -ltnp 2>/dev/null | grep -E ":($TP|$CDP)\b" | grep -o 'users:.*' | head -1))"; fi
+  fi
   # sshd must allow reverse forwards (readable as root only; skipped if we can't read it)
   if /usr/sbin/sshd -T 2>/dev/null | grep -qiE '^allowtcpforwarding (no|local)'; then die "sshd has AllowTcpForwarding disabled; set it to yes in sshd_config"; fi
   mkdir -p ~/.ssh ~/.claude; chmod 700 ~/.ssh; touch ~/.ssh/authorized_keys ~/.ssh/config ~/.claude/CLAUDE.md; chmod 600 ~/.ssh/authorized_keys
