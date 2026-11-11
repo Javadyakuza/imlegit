@@ -21,7 +21,7 @@ Later, just type `kolood` (on your computer or on the server) to get the menu ag
 
 Two ways, same features:
 
-**Interactive:** type `kolood`. The menu lists: new Claude session, continue the last session here, pick a session to resume, shell on the server, accounts, pair, restart bridge, update, permissions, uninstall. When a session ends you're back in the menu.
+**Interactive:** type `kolood`. The menu lists: new Claude session, continue the last session here, pick a session to resume, join a running session, shell on the server, accounts, phone web terminal, pair, restart bridge, update, permissions, uninstall. When a session ends you're back in the menu.
 
 **One-liners** (direct, no questions; for scripts, aliases, muscle memory):
 
@@ -31,7 +31,11 @@ Two ways, same features:
 | `kolood -c` | Continue the latest session of the current folder. Your computer's sessions for this folder are copied to the server first |
 | `kolood --resume [ID]` | Resume: pick from the list, or that session ID (copied from your computer if it's a local one) |
 | `kolood shell` | A login shell on the server (`ssh remote` works there too) |
+| `kolood sessions` | Sessions running on the server (the same list the phone page shows) |
+| `kolood attach [ID]` | Join a running session (started here, on the phone, or anywhere); without ID you pick from a list |
+| `kolood web [status \| password [PW] \| domain NAME \| domain off \| restart]` | The phone page: its address, password, domain |
 | `kolood account list \| add [NAME] \| login NAME \| use NAME \| remove NAME` | Manage Claude accounts on the server (`kolood account` alone = accounts menu) |
+| `kolood account token NAME` | Log that account in with a token from `claude setup-token` (no browser); `apikey NAME` for an API key |
 | `kolood -h` | kolood help, then Claude's own options |
 
 Flags (add to `start`, `-c` or `--resume`):
@@ -48,12 +52,28 @@ A bare word that isn't a command is rejected (`kolood fix` → use `kolood start
 - Claude is told the folder your terminal is in, and that paths in resumed local sessions live on your computer.
 - macOS Desktop/Documents/Downloads need: System Settings > Sharing > Remote Login (i) > "Allow full disk access for remote users".
 - Each `kolood` is its own session, all sharing one tunnel. Your computer stays awake while a session is open (`caffeinate` on macOS, `systemd-inhibit` on Linux).
-- If the terminal closes or the network drops, the session ends; continue with `kolood -c`.
+- Sessions live on the server: if the terminal closes or the network drops, the session keeps running. Rejoin with `kolood attach`, or open it on your phone.
 - Copied sessions keep the newer version: one you continued on the server isn't overwritten by an older local copy.
 
 ## Accounts
 
-Several Claude logins can live on the server: `default` (the normal `~/.claude`) plus one config dir per extra account (`~/.config/kolood/accounts/NAME`, used via `CLAUDE_CONFIG_DIR`). `kolood account list` shows who is logged in and which is selected; `add [NAME]`, `login NAME` (opens Claude for `/login`), `use NAME` (server-wide default for new sessions), `remove NAME`. `kolood --account NAME` overrides the selection for one session. Manage from your computer (`kolood account ...`), on the server (`kolood account ...`), or via the menus (your computer: 5, server: 8).
+Several Claude logins can live on the server: `default` (the normal `~/.claude`) plus one config dir per extra account (`~/.config/kolood/accounts/NAME`, used via `CLAUDE_CONFIG_DIR`). `kolood account list` shows who is logged in and which is selected; `add [NAME]`, `login NAME` (opens Claude for `/login`), `use NAME` (server-wide default for new sessions), `remove NAME`. `kolood --account NAME` overrides the selection for one session. Manage from your computer (`kolood account ...`), on the server (`kolood account ...`), or via the menus (your computer: 6, server: 8).
+
+**Log in without a browser** (like an SSH key for Claude): run `claude setup-token` once on any computer with a browser; it prints a long-lived token. Then `kolood account token NAME` and paste it (hidden; it travels over stdin, never on a command line). Every session of that account starts already logged in. For a pay-per-token Console key: `kolood account apikey NAME`. `kolood account token NAME off` removes it. Stored only on the server, readable only by your user (`~/.config/kolood/accounts/NAME/.kolood_env`, or `~/.claude/.kolood_env` for `default`).
+
+## Phone (web terminal)
+
+Installed with the server step. Open the address it prints (`kolood web` shows it again) on your phone:
+- **Sessions**: everything running on the server, including sessions you started with `kolood` on your computer. Tap one to join it live; ← (or the phone's back gesture) returns to the list and leaves it running; ✕ ends it.
+- **New**: a Claude session, a shell on the server, or a shell on your computer.
+- **Recent conversations**: your Claude history (all accounts); tap one to resume it.
+- **Key bar**: Esc, Tab, sticky Ctrl/⇧ (tap = once, double-tap = lock; ⇧+Tab = Claude's mode switch, ⇧+⏎ = new line), ^C, arrows (hold to repeat), Copy (the screen as selectable text), Paste.
+- Scrolling is the browser's own (no tmux): each session keeps its last 2 MB of output and replays it when you join.
+
+Access:
+- **By IP**: `https://SERVER_IP:7443` with a self-signed certificate (accept the warning once). The password is printed at install; `kolood web password` makes a new one (and logs every phone out).
+- **With a domain**: point an A record at the server, then `kolood web domain term.example.com`. Caddy is installed and gets a real certificate automatically (needs root or passwordless sudo; ports 80/443 free). `kolood web domain off` undoes it.
+- Logins last 30 days; 10 wrong passwords per 10 minutes block that address for a while.
 
 ## Architecture
 
@@ -119,6 +139,8 @@ Env: `KOLOOD_HOST` / `KOLOOD_PORT` override the auto-detected server address; `K
 - Chrome control needs Chrome started with `--remote-debugging-port=9222`. Screen control is not bridged.
 - Clients: macOS, Linux (systemd user service, or a background loop without systemd), Windows via WSL (the bridge runs while WSL runs; Windows files are under `/mnt/c`). Native Windows shells are not supported. Server: Linux with OpenSSH 7.8+.
 - Installs made before the menu existed: pair once more (server menu > *Pair a NEW computer*).
+- Running sessions live in the web daemon: restarting it (`kolood web restart`, a server reboot) ends them. Updates keep it running while sessions are open. Your Claude conversations are saved by Claude as usual, so they can be resumed.
+- The phone page needs Python 3 on the server (standard on Ubuntu/Debian) and downloads xterm.js once at install.
 
 ## Terms
 

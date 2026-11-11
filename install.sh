@@ -14,6 +14,8 @@ CONF=$HOME/.ssh/kolood_conf; LK=$HOME/.ssh/kolood_login; KH=$HOME/.ssh/kolood_kn
 LOG=/tmp/kolood.log; UNIT=kolood-bridge.service
 PLIST=$HOME/Library/LaunchAgents/com.kolood.bridge.plist
 ACCTDIR=$HOME/.config/kolood/accounts   # Claude accounts on the server; "default" = ~/.claude
+WEB=$HOME/.local/share/kolood/web; WPY=$HOME/.local/share/kolood/web/kolood_web.py   # phone web terminal + session holder
+WUNIT=kolood-web.service; WPORT=7443
 ask() { read -r -p "$1" "$2" </dev/tty; }
 yes_no() { local a=""; ask "$1" a || return 1; case "$a" in [Yy]*) return 0;; *) return 1;; esac; }
 b64d() { base64 -d 2>/dev/null || base64 -D; }
@@ -133,7 +135,9 @@ HELLO
 #!/bin/bash
 # $1 = the user's cwd on their computer (base64); the rest = kolood flags and claude args
 export PATH="$HOME/.local/bin:$PATH"
-I="$HOME/.local/share/kolood/install.sh"
+I="$HOME/.local/share/kolood/install.sh"; W="$HOME/.local/share/kolood/web/kolood_web.py"
+# run inside the session holder, so the session survives a closed terminal and the phone page can join it
+if [ -z "${KOLOOD_INSIDE:-}" ] && [ -t 0 ] && [ -f "$W" ] && python3 "$W" status >/dev/null 2>&1; then exec python3 "$W" attach -- "$0" "$@"; fi
 cwd=$(printf %s "${1:-}" | base64 -d 2>/dev/null || true); shift
 m=1; sh=0; acct=; a=()
 while [ $# -gt 0 ]; do case "$1" in
@@ -147,6 +151,8 @@ if [ -n "$acct" ] && [ "$acct" != default ]; then
   [ -d "$HOME/.config/kolood/accounts/$acct" ] || { echo "No account $acct on the server. Accounts: kolood account list"; exit 1; }
   export CLAUDE_CONFIG_DIR="$HOME/.config/kolood/accounts/$acct"
 fi
+# a token saved with `kolood account token` replaces the browser login for this account
+E="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.kolood_env"; if [ -f "$E" ]; then set -a; . "$E"; set +a; fi
 mkdir -p "$HOME/workspace"; cd "$HOME/workspace"
 [ $sh = 1 ] && exec "${SHELL:-/bin/bash}" -l
 command -v claude >/dev/null || { echo "Claude Code is not installed on this server. Install it: curl -fsSL https://claude.ai/install.sh | bash"; exit 1; }
@@ -198,6 +204,7 @@ $MARK-end
 EOF
   cat ~/.ssh/kolood_config.old >> ~/.ssh/config; rm -f ~/.ssh/kolood_config.old; chmod 600 ~/.ssh/config
   # Nothing is written to ~/.claude/CLAUDE.md: each `kolood` session is told about the computer via its system prompt (`--no-remote` skips it).
+  web_install "$HOST" || echo "WARNING: phone web terminal not set up (see above); retry: kolood web install"
   if [ $PAIRED = 1 ]; then echo "Paired and connected; refreshed. On your computer type: kolood"; return 0; fi
   if [ $KEEP = 1 ]; then echo "Refreshed. Your computer is not connected right now (asleep/offline?)."; return 0; fi
 
@@ -291,7 +298,9 @@ account() {
     list)
       sel=$(cat ~/.config/kolood/account 2>/dev/null || true); sel=${sel:-default}
       for n in default $(ls "$ACCTDIR" 2>/dev/null); do
-        if [ -f "$(acct_dir "$n")/.credentials.json" ]; then s="logged in"; else s="not logged in"; fi
+        e="$(acct_dir "$n")/.kolood_env"
+        if grep -q ANTHROPIC_API_KEY "$e" 2>/dev/null; then s="API key"; elif [ -f "$e" ]; then s="token (no browser login)"
+        elif [ -f "$(acct_dir "$n")/.credentials.json" ]; then s="logged in"; else s="not logged in"; fi
         if [ "$n" = "$sel" ]; then echo "* $n: $s"; else echo "  $n: $s"; fi
       done;;
     add)
@@ -301,8 +310,27 @@ account() {
       [[ "$n" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || die "bad account name: $n (lowercase letters, digits, - or _; max 32)"
       [ -d "$(acct_dir "$n")" ] && die "account $n already exists"
       mkdir -p "$(acct_dir "$n")"; chmod 700 "$(acct_dir "$n")"
-      if { : </dev/tty; } 2>/dev/null; then run account login "$n"
-      else echo "created $n; log in with: kolood --account $n   (then /login)"; fi;;
+      if [ -t 0 ]; then
+        m=""; ask "Log in with [b]rowser (/login) or a [t]oken from 'claude setup-token' / API key? [b/t]: " m || true
+        case "$m" in [Tt]*) run account token "$n";; *) run account login "$n";; esac
+      else echo "created $n; log in with: kolood account token $n   (paste a token from: claude setup-token)"; fi;;
+    token|apikey)   # VALUE: argument, else read hidden from the terminal, else one line from stdin; "off" removes it
+      k=$1; n=${2:-}; t=${3:-}
+      [ -n "$n" ] || die "usage: install.sh account token|apikey NAME [VALUE|off]   (VALUE is read from stdin if omitted)"
+      [ "$n" = default ] && mkdir -p ~/.claude
+      [ -d "$(acct_dir "$n")" ] || die "no account $n (see: kolood account list)"
+      if [ -z "$t" ]; then
+        if [ -t 0 ]; then
+          if [ "$k" = token ]; then echo "Get a token with:  claude setup-token   (on any computer with a browser)"; fi
+          read -r -s -p "Paste it (hidden): " t; echo
+        else IFS= read -r t || true; fi
+      fi
+      t=$(printf %s "$t" | tr -d ' \r\n')
+      if [ "$t" = off ]; then rm -f "$(acct_dir "$n")/.kolood_env"; echo "removed the saved token/key of $n"; return 0; fi
+      [[ "$t" =~ ^sk-ant-[A-Za-z0-9_-]{20,}$ ]] || die "that is not a Claude token or API key (they start with sk-ant-)"
+      v=CLAUDE_CODE_OAUTH_TOKEN; if [ "$k" = apikey ]; then v=ANTHROPIC_API_KEY; fi
+      (umask 077; printf "%s='%s'\n" "$v" "$t" > "$(acct_dir "$n")/.kolood_env")
+      echo "saved: account $n logs in with this $k from now on (no browser)";;
     login)
       shift; n=${1:-}; [ -n "$n" ] || die "usage: install.sh account login NAME"
       [ -d "$(acct_dir "$n")" ] || die "no account $n (see: kolood account list)"
@@ -327,12 +355,14 @@ account() {
       while :; do
         echo; echo "== Claude accounts on this server =="
         account list
-        echo " a) add   l) log in   u) use (make default)   r) remove   0) back"
+        echo " a) add   l) log in (browser)   t) set a token (no browser)   k) set an API key   u) use (make default)   r) remove   0) back"
         c=""; ask "Choose: " c || return 0
         n=""
         case "$c" in
           a) ask "Name (Enter = kolood, kolood2, ...): " n || true; run account add "$n";;
           l) ask "Account: " n || true; run account login "$n";;
+          t) ask "Account: " n || true; run account token "$n";;
+          k) ask "Account: " n || true; run account apikey "$n";;
           u) ask "Account: " n || true; run account use "$n";;
           r) ask "Account: " n || true
              if yes_no "Remove account $n? [y/N] "; then run account remove "$n"; fi;;
@@ -340,7 +370,137 @@ account() {
           *) echo "Pick one of the letters above.";;
         esac
       done;;
-    *) die "usage: install.sh account list|add [NAME]|login NAME|use NAME|remove NAME";;
+    *) die "usage: install.sh account list|add [NAME]|login NAME|token NAME [TOKEN|off]|apikey NAME [KEY|off]|use NAME|remove NAME";;
+  esac
+}
+
+# ---------------------------------------------------------------- phone web terminal (server)
+fetch() { curl -fsSL --retry 2 -m 120 "$1" -o "$2.tmp" && mv "$2.tmp" "$2"; }
+webcfg() {  # webcfg key=value ... (empty value deletes the key) on ~/.config/kolood/web.json
+  python3 - "$@" <<'PY2'
+import json, os, sys
+p = os.path.expanduser("~/.config/kolood/web.json")
+c = json.load(open(p)) if os.path.exists(p) else {}
+for kv in sys.argv[1:]:
+    k, v = kv.split("=", 1)
+    if v == "": c.pop(k, None)
+    else: c[k] = int(v) if v.isdigit() else v
+os.makedirs(os.path.dirname(p), exist_ok=True)
+fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, json.dumps(c, indent=2).encode()); os.close(fd)
+PY2
+}
+webget() { python3 -c 'import json,os,sys;p=os.path.expanduser("~/.config/kolood/web.json");c=json.load(open(p)) if os.path.exists(p) else {};print(c.get(sys.argv[1],""))' "$1"; }
+web_url() { local d; d=$(webget domain); if [ -n "$d" ]; then echo "https://$d"; else echo "https://$(webget host):$(webget tls_port)"; fi; }
+web_running() { python3 "$WPY" status >/dev/null 2>&1; }
+sudo_ok() { [ "$(id -u)" = 0 ] && SUDO="" && return 0; command -v sudo >/dev/null && sudo -n true 2>/dev/null && SUDO=sudo && return 0; return 1; }
+
+web_service() {  # (re)start the daemon; keeps it running when sessions are open unless forced
+  if web_running && [ "${1:-}" != force ] && [ -n "$(python3 "$WPY" list 2>/dev/null)" ]; then
+    echo "web: kept running ($(python3 "$WPY" list | wc -l | tr -d ' ') open sessions); apply updates later with: kolood web restart"; return 0; fi
+  if systemctl --user show-environment >/dev/null 2>&1; then
+    mkdir -p ~/.config/systemd/user
+    printf '[Unit]\nDescription=kolood web terminal + session holder\nStartLimitIntervalSec=0\n[Service]\nExecStart=%s %s serve\nRestart=always\nRestartSec=3\n[Install]\nWantedBy=default.target\n' "$(command -v python3)" "$WPY" > ~/.config/systemd/user/$WUNIT
+    systemctl --user daemon-reload; systemctl --user enable "$WUNIT" >/dev/null 2>&1; systemctl --user restart "$WUNIT"
+    loginctl enable-linger "$(id -un)" 2>/dev/null || true
+  else
+    pkill -u "$(id -u)" -f "kolood_web.py serve" 2>/dev/null || true; sleep 1
+    (nohup python3 "$WPY" serve >>/tmp/kolood-web.log 2>&1 &)
+    if command -v crontab >/dev/null && ! crontab -l 2>/dev/null | grep -qF "$MARK"; then
+      (crontab -l 2>/dev/null; echo "@reboot python3 $WPY serve >>/tmp/kolood-web.log 2>&1 $MARK") | crontab -; fi
+  fi
+  for _ in $(seq 10); do web_running && return 0; sleep 1; done
+  echo "web: the daemon did not start; log: $(if systemctl --user show-environment >/dev/null 2>&1; then echo "journalctl --user -u $WUNIT"; else echo /tmp/kolood-web.log; fi)"; return 1
+}
+
+web_install() {  # files, password, self-signed HTTPS for access by IP, service
+  local host=${1:-$(webget host)} src f
+  command -v python3 >/dev/null || { echo "web: python3 is missing (apt install python3)"; return 1; }
+  mkdir -p "$WEB/static" ~/.config/kolood; chmod 700 ~/.config/kolood
+  src=$(cd "$(dirname "$0")" 2>/dev/null && pwd)/web
+  for f in kolood_web.py index.html; do
+    if [ -f "$src/$f" ] && ! [ "$src/$f" -ef "$WEB/$f" ]; then cp "$src/$f" "$WEB/$f"
+    else fetch "${URL%/install.sh}/web/$f" "$WEB/$f" || [ -f "$WEB/$f" ] || { echo "web: could not download $f"; return 1; }; fi
+  done
+  # xterm.js (pinned), downloaded once
+  [ -f "$WEB/static/xterm.js" ] || fetch https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js "$WEB/static/xterm.js" || { echo "web: could not download xterm.js"; return 1; }
+  [ -f "$WEB/static/xterm.css" ] || fetch https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css "$WEB/static/xterm.css" || return 1
+  [ -f "$WEB/static/addon-fit.js" ] || fetch https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js "$WEB/static/addon-fit.js" || return 1
+  [ -n "$host" ] && webcfg host="$host"; [ -n "$(webget tls_port)" ] || webcfg tls_port=$WPORT
+  # HTTPS by IP: a self-signed certificate (the phone asks once to trust it); a domain gets a real one (kolood web domain)
+  if [ ! -f ~/.config/kolood/web.crt ] && command -v openssl >/dev/null; then
+    case "$host" in *[!0-9.]*) san="DNS:$host";; *) san="IP:$host";; esac
+    (umask 077; openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=kolood" -addext "subjectAltName=$san" \
+      -keyout ~/.config/kolood/web.key -out ~/.config/kolood/web.crt >/dev/null 2>&1) || echo "web: openssl failed; HTTPS by IP disabled"
+  fi
+  if [ -f ~/.config/kolood/web.crt ]; then webcfg cert="$HOME/.config/kolood/web.crt" key="$HOME/.config/kolood/web.key"; fi
+  NEWPW=""; [ -n "$(webget pw_hash)" ] || NEWPW=$(python3 "$WPY" passwd | tail -1)
+  web_service || return 1
+  if sudo_ok && command -v ufw >/dev/null && $SUDO ufw status 2>/dev/null | grep -q "Status: active"; then $SUDO ufw allow "$(webget tls_port)/tcp" >/dev/null || true; fi
+  echo "Phone: open $(web_url)"
+  [ -z "$(webget domain)" ] && echo "       (self-signed certificate: accept the warning once; for a real one: kolood web domain NAME)"
+  [ -n "$NEWPW" ] && echo "       password: $NEWPW   (change: kolood web password)"
+  return 0
+}
+
+web_domain() {  # put the page on a domain with automatic HTTPS (Caddy; needs root or passwordless sudo)
+  local d=${1:-} ip got cf=/etc/caddy/Caddyfile
+  [[ "$d" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]] || die "usage: kolood web domain NAME (e.g. term.example.com) | kolood web domain off"
+  sudo_ok || die "setting up a domain needs root or passwordless sudo on the server"
+  ip=$(webget host); got=$(getent ahostsv4 "$d" 2>/dev/null | awk '{print $1; exit}')
+  if [ "$got" != "$ip" ]; then
+    echo "DNS: $d points to '${got:-nothing}', this server is $ip. Create an A record $d -> $ip first."
+    if [ -r /dev/tty ] && { : </dev/tty; } 2>/dev/null; then yes_no "Continue anyway? [y/N] " || return 1; else return 1; fi
+  fi
+  if ss -ltnp 2>/dev/null | grep -E ':(80|443)\b' | grep -vq caddy; then
+    die "port 80/443 is used by another web server; point it at 127.0.0.1:7700 yourself (reverse proxy with WebSocket)"; fi
+  command -v caddy >/dev/null || { echo "Installing Caddy..."; $SUDO apt-get update -qq && $SUDO apt-get install -y caddy >/dev/null; } || die "could not install caddy (apt). Install it, then retry"
+  # the stock Caddyfile only serves a placeholder page: replace it; otherwise add our block
+  if [ ! -f "$cf" ] || grep -q /usr/share/caddy "$cf"; then echo "" | $SUDO tee "$cf" >/dev/null; fi
+  $SUDO sed -i "/$MARK\$/,/$MARK-end/d" "$cf"
+  printf '%s\n%s {\n  reverse_proxy 127.0.0.1:%s\n}\n%s-end\n' "$MARK" "$d" "$(webget port | grep . || echo 7700)" "$MARK" | $SUDO tee -a "$cf" >/dev/null
+  $SUDO systemctl enable caddy >/dev/null 2>&1 || true; $SUDO systemctl reload caddy 2>/dev/null || $SUDO systemctl restart caddy || die "caddy did not start: journalctl -u caddy"
+  if command -v ufw >/dev/null && $SUDO ufw status 2>/dev/null | grep -q "Status: active"; then $SUDO ufw allow 80/tcp >/dev/null; $SUDO ufw allow 443/tcp >/dev/null; fi
+  webcfg domain="$d"
+  echo "Getting a certificate for $d..."
+  for _ in $(seq 30); do curl -fsS -m 5 -o /dev/null "https://$d/" 2>/dev/null && { echo "Phone: open https://$d"; return 0; }; sleep 2; done
+  echo "Caddy is set up but https://$d does not answer yet (DNS/firewall?). Check: journalctl -u caddy"
+}
+web_domain_off() {
+  local cf=/etc/caddy/Caddyfile
+  if [ -f "$cf" ] && grep -qF "$MARK" "$cf" && sudo_ok; then $SUDO sed -i "/$MARK\$/,/$MARK-end/d" "$cf"; $SUDO systemctl reload caddy 2>/dev/null || true; fi
+  webcfg domain=; echo "domain removed; phone: $(web_url)"
+}
+
+web_status() {
+  if web_running; then echo "web terminal: running   $(web_url)"; else echo "web terminal: NOT running (kolood web restart)"; fi
+  local n; n=$(python3 "$WPY" list 2>/dev/null | wc -l | tr -d ' '); echo "open sessions: ${n:-0}"
+  python3 "$WPY" list 2>/dev/null | sed 's/^/  /' || true
+}
+
+web() {
+  [ -f "$WPY" ] || { [ "${1:-}" = install ] || die "web terminal not installed: kolood web install"; }
+  case "${1:-}" in
+    status|url) web_status;;
+    password) if [ -n "${2:-}" ]; then python3 "$WPY" passwd "$2"; echo "password set"; else echo "new password: $(python3 "$WPY" passwd | tail -1)"; fi
+      echo "(all phones are logged out)";;
+    domain) if [ "${2:-}" = off ]; then web_domain_off; else web_domain "${2:-}"; fi;;
+    restart) web_service force;;
+    install) web_install;;
+    ""|menu)
+      while :; do
+        echo; echo "== Phone web terminal =="; web_status
+        echo " p) new password   d) set a domain (automatic HTTPS)   o) remove the domain   r) restart   0) back"
+        c=""; ask "Choose: " c || return 0
+        case "$c" in
+          p) run web password;;
+          d) n=""; ask "Domain (its DNS A record must point to this server): " n || true; run web domain "$n";;
+          o) run web domain off;;
+          r) if yes_no "Restarting ends all open sessions. Restart? [y/N] "; then run web restart; fi;;
+          0) return 0;;
+          *) echo "Pick one of the letters above.";;
+        esac
+      done;;
+    *) die "usage: kolood web [status|password [PW]|domain NAME|domain off|restart|install]";;
   esac
 }
 
@@ -471,7 +631,11 @@ One-liners (no questions asked):
   kolood -c                   continue the last session of this folder (local ones are copied first)
   kolood --resume [ID]        resume: pick from a list, or that session ID (copied from here if local)
   kolood shell                a login shell on the server
+  kolood sessions             running sessions on the server (also visible on the phone page)
+  kolood attach [ID]          join a running session (pick from a list without ID)
+  kolood web [status | password [PW] | domain NAME | domain off | restart]   the phone page
   kolood account list | add [NAME] | login NAME | use NAME | remove NAME
+  kolood account token NAME   log NAME in with a token from `claude setup-token` (no browser; `apikey` for an API key)
 Flags (combine with start / -c / --resume; any other flag also starts Claude directly):
   --account NAME              use that Claude account on the server
   --no-remote                 this session is not told about your computer
@@ -481,16 +645,34 @@ HELP
     echo "--- Claude Code options (pass them after 'kolood start'; they run on the server) ---";;
   start|claude) shift;;
   shell|--shell) shift; set -- --shell "$@";;
-  account) ;;
+  account|web|sessions|attach) ;;
   -*) ;;
   *) echo "kolood: unknown command '$1'. See: kolood -h   (to start Claude with a prompt: kolood start \"$1\")" >&2; exit 2;;
 esac
 . "$HOME/.ssh/kolood_conf" 2>/dev/null || { echo "kolood is not paired yet: run  kolood  and choose Pair"; exit 1; }
-O=(-t -i "$HOME/.ssh/kolood_login" -o IdentitiesOnly=yes -o UserKnownHostsFile="$HOME/.ssh/kolood_known_hosts" -o StrictHostKeyChecking="$STRICT" -o ServerAliveInterval=30 -p "$port" "$suser@$host")
-if [ "${1:-}" = account ]; then
-  shift
-  exec ssh "${O[@]}" "bash ~/.local/share/kolood/install.sh account$(printf ' %q' "$@")"
+O=(-i "$HOME/.ssh/kolood_login" -o IdentitiesOnly=yes -o UserKnownHostsFile="$HOME/.ssh/kolood_known_hosts" -o StrictHostKeyChecking="$STRICT" -o ServerAliveInterval=30 -p "$port" "$suser@$host")
+WP="python3 ~/.local/share/kolood/web/kolood_web.py"
+if [ "${1:-}" = account ] && { [ "${2:-}" = token ] || [ "${2:-}" = apikey ]; } && [ -n "${3:-}" ]; then
+  t=${4:-}   # the token travels over stdin, never on a command line
+  if [ -z "$t" ]; then
+    if [ "$2" = token ]; then echo "Get a token with:  claude setup-token   (on any computer with a browser)"; fi
+    read -r -s -p "Paste it (hidden): " t </dev/tty; echo
+  fi
+  printf '%s\n' "$t" | ssh "${O[@]}" "bash ~/.local/share/kolood/install.sh account $2 $(printf %q "$3")"; exit $?
 fi
+O=(-t "${O[@]}")
+case "${1:-}" in
+  account|web) exec ssh "${O[@]}" "bash ~/.local/share/kolood/install.sh$(printf ' %q' "$@")";;
+  sessions) exec ssh "${O[@]}" "$WP list";;
+  attach) id=${2:-}
+    if [ -z "$id" ]; then   # pick one
+      L=$(ssh "${O[@]}" "$WP list" 2>/dev/null | tr -d '\r'); [ -n "$L" ] || { echo "No running sessions on the server."; exit 1; }
+      echo "$L" | awk -F'\t' '{printf "%2d) %s  [%s, %s attached, %s]\n", NR, $2, $3, $4, $5}'
+      read -r -p "Join which? " n </dev/tty; id=$(echo "$L" | sed -n "${n}p" | cut -f1); [ -n "$id" ] || exit 1
+    fi
+    if command -v caffeinate >/dev/null; then exec caffeinate -i ssh "${O[@]}" "$WP attach --id $(printf %q "$id")"; fi
+    exec ssh "${O[@]}" "$WP attach --id $(printf %q "$id")";;
+esac
 B=$(printf %s "$PWD" | base64 | tr -d '\n')
 W=(); if command -v caffeinate >/dev/null; then W=(caffeinate -i)
 elif command -v systemd-inhibit >/dev/null && systemd-inhibit --what=sleep --why=kolood true 2>/dev/null; then W=(systemd-inhibit --what=sleep --why=kolood); fi
@@ -552,6 +734,10 @@ legacy_cleanup() {
 remove() {
   legacy_cleanup
   tunnel_stop
+  systemctl --user disable --now "$WUNIT" >/dev/null 2>&1 || true; rm -f ~/.config/systemd/user/$WUNIT
+  pkill -u "$(id -u)" -f "kolood_web.py serve" 2>/dev/null || true
+  if command -v crontab >/dev/null && crontab -l 2>/dev/null | grep -qF "$MARK"; then crontab -l | grep -vF "$MARK" | crontab - || true; fi
+  if [ -f /etc/caddy/Caddyfile ] && grep -qF "$MARK" /etc/caddy/Caddyfile && sudo_ok; then $SUDO sed -i "/$MARK\$/,/$MARK-end/d" /etc/caddy/Caddyfile; $SUDO systemctl reload caddy 2>/dev/null || true; fi
   rm -f "$PLIST" ~/.config/systemd/user/$UNIT; systemctl --user daemon-reload >/dev/null 2>&1 || true
   for f in ~/.zshrc ~/.bash_profile ~/.bashrc ~/.profile; do if [ -f "$f" ]; then "${GNUSED[@]}" "/$MARK/d" "$f"; fi; done
   if [ -f ~/.local/bin/kolood ] && grep -qF "$MARK" ~/.local/bin/kolood; then rm -f ~/.local/bin/kolood; fi
@@ -571,31 +757,33 @@ client_menu() {
   while :; do
     echo; echo "== kolood: this computer ($(plat)) =="
     if load_conf; then
-      if bridge_up; then echo "Server $suser@$host:$port   bridge: UP"; else echo "Server $suser@$host:$port   bridge: DOWN (try 7)"; fi
+      if bridge_up; then echo "Server $suser@$host:$port   bridge: UP"; else echo "Server $suser@$host:$port   bridge: DOWN (try 9)"; fi
     elif [ -f ~/.ssh/cmb_run.sh ]; then echo "Old imlegit install found: pair again (on the server: 'Pair a NEW computer')."
-    else echo "Not paired yet: run the server step first, then choose 6."; fi
+    else echo "Not paired yet: run the server step first, then choose 8."; fi
     echo " 1) New Claude session                (kolood start)"
     echo " 2) Continue the last session here    (kolood -c)"
     echo " 3) Pick a session to resume          (kolood --resume)"
-    echo " 4) Shell on the server               (kolood shell)"
-    echo " 5) Accounts on the server            (kolood account)"
-    echo " 6) Pair with a server (paste a token)"
-    echo " 7) Restart the bridge"
-    echo " 8) Update kolood (here and on the server)"
-    echo " 9) Toggle: Claude may run 'ssh remote' without asking"
-    echo "10) Uninstall (here and on the server)"
+    echo " 4) Join a running session            (kolood attach)"
+    echo " 5) Shell on the server               (kolood shell)"
+    echo " 6) Accounts on the server            (kolood account)"
+    echo " 7) Phone web terminal                (kolood web)"
+    echo " 8) Pair with a server (paste a token)"
+    echo " 9) Restart the bridge"
+    echo "10) Update kolood (here and on the server)"
+    echo "11) Toggle: Claude may run 'ssh remote' without asking"
+    echo "12) Uninstall (here and on the server)"
     echo " 0) Quit"
     c=""; ask "Choose: " c || exit 0
     case "$c" in
-      1|2|3|4|5) if [ -f "$CONF" ]; then   # run it, then come back to this menu
-           case "$c" in 1) set -- start;; 2) set -- -c;; 3) set -- --resume;; 4) set -- shell;; 5) set -- account menu;; esac
+      1|2|3|4|5|6|7) if [ -f "$CONF" ]; then   # run it, then come back to this menu
+           case "$c" in 1) set -- start;; 2) set -- -c;; 3) set -- --resume;; 4) set -- attach;; 5) set -- shell;; 6) set -- account menu;; 7) set -- web menu;; esac
            "$HOME/.local/bin/kolood" "$@" </dev/tty || true
-         else echo "Pair first (6)."; fi;;
-      6) run client;;
-      7) if [ -f "$CONF" ]; then run restart_bridge; else echo "Pair first (6)."; fi;;
-      8) run update;;
-      9) if load_conf; then run rrun allow toggle; else echo "Pair first (6)."; fi;;
-      10) if yes_no "Remove kolood from this computer AND the server? [y/N] "; then
+         else echo "Pair first (8)."; fi;;
+      8) run client;;
+      9) if [ -f "$CONF" ]; then run restart_bridge; else echo "Pair first (8)."; fi;;
+      10) run update;;
+      11) if load_conf; then run rrun allow toggle; else echo "Pair first (8)."; fi;;
+      12) if yes_no "Remove kolood from this computer AND the server? [y/N] "; then
            if load_conf; then rrun remove || echo "Server not reachable: run 'bash install.sh remove' there."; fi
            remove; exit 0; fi;;
       0|q|Q) exit 0;;
@@ -621,6 +809,7 @@ server_menu() {
     echo " 6) Update kolood"
     echo " 7) Uninstall"
     echo " 8) Accounts (Claude logins)"
+    echo " 9) Phone web terminal (URL, password, domain)"
     echo " 0) Quit"
     c=""; ask "Choose: " c || exit 0
     case "$c" in
@@ -633,6 +822,7 @@ server_menu() {
       6) run update;;
       7) if yes_no "Remove kolood from this server? [y/N] "; then remove; exit 0; fi;;
       8) run account menu;;
+      9) run web menu;;
       0|q|Q) exit 0;;
       *) echo "Pick one of the numbers above.";;
     esac
@@ -664,6 +854,7 @@ case "${1:-}" in
   mount) mount_remote;;
   allow) allow "${2:-on}";;
   account) shift; account "$@";;
+  web) shift; web "$@";;
   update) update;;
   remove|uninstall|--uninstall) remove;;
   *kolood1.*) client "$1";;

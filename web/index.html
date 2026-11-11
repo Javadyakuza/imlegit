@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="kolood">
+<meta name="theme-color" content="#000">
+<title>kolood</title>
+<link rel="stylesheet" href="/static/xterm.css">
+<script src="/static/xterm.js"></script>
+<script src="/static/addon-fit.js"></script>
+<style>
+:root{--sat:env(safe-area-inset-top);--sab:env(safe-area-inset-bottom)}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:#000;color:#e8e8e8;font:15px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
+.view{display:none;height:100%}
+.view.active{display:flex;flex-direction:column}
+#v-login{align-items:center;justify-content:center}
+.loginbox{width:min(320px,90vw);display:flex;flex-direction:column;gap:12px}
+.loginbox h1{margin:0 0 8px;font-size:28px;letter-spacing:1px}
+.loginbox input{padding:12px;border-radius:10px;border:1px solid #444;background:#111;color:#eee;font-size:16px}
+.loginbox button{padding:12px;border-radius:10px;background:#0a84ff;color:#fff;font-weight:600}
+#loginerr{color:#ff6b6b;min-height:20px;font-size:14px}
+.hdr{display:flex;align-items:center;justify-content:space-between;padding:calc(10px + var(--sat)) 16px 10px;border-bottom:1px solid #222;flex:none}
+.hdr .brand{font-weight:700;font-size:20px}
+.hdr button{color:#0a84ff;font-size:15px}
+#sesscroll{flex:1;overflow-y:auto;padding:0 16px 40px;-webkit-overflow-scrolling:touch}
+#sesscroll h2{font-size:13px;text-transform:uppercase;color:#888;margin:18px 0 8px}
+.card{display:flex;align-items:center;gap:10px;background:#161616;border:1px solid #262626;border-radius:12px;padding:12px 14px;margin-bottom:8px}
+.card .info{flex:1;min-width:0;cursor:pointer}
+.card .t{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card .m{font-size:12px;color:#999;margin-top:2px}
+.badge{background:#2a2a2a;border-radius:6px;padding:2px 7px;font-size:11px;color:#9cc}
+.card .kill{color:#ff6b6b;font-size:18px;padding:6px 10px}
+.newbtn{display:block;width:100%;text-align:left;background:#161616;border:1px solid #262626;border-radius:12px;padding:13px 14px;margin-bottom:8px}
+.newbtn b{color:#0a84ff}
+.row{display:flex;align-items:center;gap:10px;padding:11px 4px;border-bottom:1px solid #1e1e1e;cursor:pointer}
+.row .t{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .m{font-size:12px;color:#999;flex:none}
+#acctrow{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+#acctrow label{font-size:13px;color:#999}
+#acctrow select{flex:1;background:#161616;color:#eee;border:1px solid #333;border-radius:8px;padding:8px}
+#topbar{display:flex;align-items:center;gap:10px;padding:8px 10px;padding-top:calc(8px + var(--sat));background:#161616;border-bottom:1px solid #222;flex:none}
+#topbar .t{flex:1;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
+#topbar button{font-size:20px;padding:4px 10px}
+#topbar #tkill{color:#ff6b6b}
+#termwrap{flex:none;min-height:0;position:relative;background:#000}
+#xterm{position:absolute;inset:0}
+#banner{display:none;position:absolute;top:0;left:0;right:0;background:#0a84ff;color:#fff;text-align:center;padding:6px;font-size:13px;z-index:9}
+#banner.show{display:block}
+#keybar{position:fixed;left:0;right:0;bottom:0;background:#222;padding:6px;padding-bottom:calc(6px + var(--sab));z-index:10;touch-action:none}
+#kb{display:grid;grid-template-columns:46px repeat(8,1fr) 46px;grid-auto-rows:46px;gap:6px}
+.k{background:#4a4a4a;border-radius:9px;font-size:15px;display:flex;align-items:center;justify-content:center;user-select:none;-webkit-user-select:none;touch-action:none}
+.k.tall{grid-row:span 2}
+.k.on{background:#0a84ff}
+.k.lock{background:#ff9f0a}
+.k.mod{font-size:13px}
+#copyov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:20;flex-direction:column;padding:calc(20px + var(--sat)) 16px calc(16px + var(--sab))}
+#copyov.show{display:flex}
+#copyta{flex:1;background:#111;color:#ccc;border:1px solid #333;border-radius:10px;font:12px Menlo,monospace;padding:10px;resize:none;width:100%}
+#copyov .btns{display:flex;gap:10px;margin-top:12px}
+#copyov .btns button{flex:1;padding:12px;border-radius:10px;background:#0a84ff;color:#fff;font-weight:600}
+</style>
+</head>
+<body>
+<div id="v-login" class="view active">
+  <div class="loginbox">
+    <h1>kolood</h1>
+    <input id="pw" type="password" placeholder="Password" autocomplete="current-password">
+    <button id="loginbtn">Sign in</button>
+    <div id="loginerr"></div>
+  </div>
+</div>
+
+<div id="v-sessions" class="view">
+  <div class="hdr"><span class="brand">kolood</span><button id="logout">Log out</button></div>
+  <div id="sesscroll">
+    <h2>Running</h2>
+    <div id="running"></div>
+    <h2>New</h2>
+    <div id="acctrow" style="display:none"><label>Account</label><select id="acctsel"></select></div>
+    <button class="newbtn" data-kind="claude"><b>Claude</b></button>
+    <button class="newbtn" data-kind="shell"><b>Shell</b> (server)</button>
+    <button class="newbtn" data-kind="remote"><b>Shell</b> (your computer)</button>
+    <h2>Recent conversations</h2>
+    <div id="recent"></div>
+  </div>
+</div>
+
+<div id="v-term" class="view">
+  <div id="topbar">
+    <button id="back">&#8592;</button>
+    <span class="t" id="ttitle"></span>
+    <button id="tkill">&#10005;</button>
+  </div>
+  <div id="termwrap"><div id="xterm"></div><div id="banner">reconnecting…</div></div>
+  <div id="keybar"><div id="kb">
+    <button class="k tall mod" data-mod="shift">&#8679;</button>
+    <button class="k" data-k="esc">Esc</button>
+    <button class="k" data-k="tab">Tab</button>
+    <button class="k mod" data-mod="ctrl">Ctrl</button>
+    <button class="k" data-k="^c">^C</button>
+    <button class="k rep" data-k="up">&#8593;</button>
+    <button class="k" data-k="~">~</button>
+    <button class="k rep" data-k="bs">&#9003;</button>
+    <button class="k" data-act="copy">Copy</button>
+    <button class="k tall" data-k="enter">&#9167;</button>
+    <button class="k" data-k="/">/</button>
+    <button class="k" data-k="-">-</button>
+    <button class="k rep" data-k="left">&#8592;</button>
+    <button class="k rep" data-k="down">&#8595;</button>
+    <button class="k rep" data-k="right">&#8594;</button>
+    <button class="k rep" data-k="del">Del</button>
+    <button class="k" data-act="paste">Paste</button>
+  </div></div>
+  <div id="copyov">
+    <textarea id="copyta" readonly></textarea>
+    <div class="btns"><button id="copyall">Copy all</button><button id="copydone">Done</button></div>
+  </div>
+</div>
+
+<script>
+'use strict';
+var $=function(id){return document.getElementById(id)};
+var SEQ={esc:'\x1b',tab:'\t',enter:'\r','^c':'\x03',bs:'\x7f',del:'\x1b[3~',
+  up:'\x1b[A',down:'\x1b[B',right:'\x1b[C',left:'\x1b[D'};
+var SHIFTED={tab:'\x1b[Z',enter:'\x1b\r',up:'\x1b[1;2A',down:'\x1b[1;2B',
+  right:'\x1b[1;2C',left:'\x1b[1;2D'};
+var mods={ctrl:{on:false,lock:false,last:0},shift:{on:false,lock:false,last:0}};
+var ws=null,term=null,fit=null,sessId=null,sessTitle='',ended=false,retryT=1,retryTimer=null;
+var pollTimer=null,curData=null;
+
+function showView(id){
+  ['v-login','v-sessions','v-term'].forEach(function(v){
+    $(v).classList.toggle('active',v===id);
+  });
+}
+function api(method,path,body){
+  var opt={method:method,headers:{'X-Kolood':'1'},credentials:'same-origin'};
+  if(body!==undefined){opt.body=JSON.stringify(body);opt.headers['Content-Type']='application/json';}
+  return fetch(path,opt);
+}
+function relTime(ts){
+  var d=(Date.now()/1000)-ts;
+  if(d<60)return 'just now';
+  if(d<3600)return Math.floor(d/60)+'m ago';
+  if(d<86400)return Math.floor(d/3600)+'h ago';
+  return Math.floor(d/86400)+'d ago';
+}
+
+/* ---------- login ---------- */
+function doLogin(){
+  var err=$('loginerr');err.textContent='';
+  api('POST','/api/login',{password:$('pw').value}).then(function(r){
+    if(r.status===200){$('pw').value='';start();}
+    else if(r.status===429){err.textContent='too many attempts, wait';}
+    else if(r.status===503){r.json().then(function(d){err.textContent=d.error||'no password set';},function(){err.textContent='no password set';});}
+    else{err.textContent='wrong password';}
+  },function(){err.textContent='network error';});
+}
+$('loginbtn').onclick=doLogin;
+$('pw').addEventListener('keydown',function(e){if(e.key==='Enter')doLogin();});
+$('logout').onclick=function(){
+  api('POST','/api/logout').then(function(){showView('v-login');stopPoll();},function(){showView('v-login');stopPoll();});
+};
+
+/* ---------- sessions ---------- */
+function start(){
+  api('GET','/api/sessions').then(function(r){
+    if(r.status===401){showView('v-login');return;}
+    showView('v-sessions');refresh();startPoll();
+    var m=location.hash.match(/^#s=([A-Za-z0-9]+)/);
+    if(m){openSession(m[1],'session',true);}
+  },function(){showView('v-login');});
+}
+function startPoll(){
+  stopPoll();
+  pollTimer=setInterval(function(){
+    if(!document.hidden&&$('v-sessions').classList.contains('active'))refresh();
+  },5000);
+  document.addEventListener('visibilitychange',function(){
+    if(!document.hidden&&$('v-sessions').classList.contains('active'))refresh();
+  });
+}
+function stopPoll(){if(pollTimer){clearInterval(pollTimer);pollTimer=null;}}
+function refresh(){
+  api('GET','/api/sessions').then(function(r){
+    if(r.status!==200)return;
+    r.json().then(render,function(){});
+  },function(){});
+}
+function render(d){
+  var run=$('running');run.innerHTML='';
+  d.running.forEach(function(s){
+    var c=document.createElement('div');c.className='card';
+    c.innerHTML='<div class="info"><div class="t"></div><div class="m"></div></div>'+
+      '<span class="badge"></span><button class="kill">&#10005;</button>';
+    c.querySelector('.t').textContent=s.title||s.id;
+    c.querySelector('.badge').textContent=s.kind;
+    c.querySelector('.m').textContent=relTime(s.started)+' · '+s.clients+' attached';
+    c.querySelector('.info').onclick=function(){openSession(s.id,s.title);};
+    c.querySelector('.kill').onclick=function(ev){
+      ev.stopPropagation();
+      if(confirm('Kill "'+(s.title||s.id)+'"?'))
+        api('POST','/api/kill',{id:s.id}).then(refresh,refresh);
+    };
+    run.appendChild(c);
+  });
+  if(!d.running.length)
+    run.innerHTML='<div style="color:#666;font-size:13px">No running sessions</div>';
+  var sel=$('acctsel'),row=$('acctrow');
+  if(d.accounts&&d.accounts.length>1){
+    row.style.display='flex';
+    var prev=null;try{prev=localStorage.getItem('kolood-account');}catch(e){}
+    sel.innerHTML='';
+    d.accounts.forEach(function(a){
+      var o=document.createElement('option');o.value=a;o.textContent=a;sel.appendChild(o);
+    });
+    if(prev&&d.accounts.indexOf(prev)>=0)sel.value=prev;
+    sel.onchange=function(){try{localStorage.setItem('kolood-account',sel.value);}catch(e){}};
+  }else{row.style.display='none';sel.value='';}
+  var rec=$('recent');rec.innerHTML='';
+  d.recent.forEach(function(r){
+    var el=document.createElement('div');el.className='row';
+    el.innerHTML='<div class="t"></div><div class="m"></div>';
+    el.querySelector('.t').textContent=r.title;
+    el.querySelector('.m').textContent=(r.account!=='default'?r.account+' · ':'')+relTime(r.mtime);
+    el.onclick=function(){
+      var body={kind:'claude',resume:r.id};
+      var acct=(sel.value&&sel.value!=='default')?sel.value:
+        (r.account!=='default'?r.account:'default');
+      if(acct)body.account=acct;
+      api('POST','/api/new',body).then(function(x){
+        if(x.status!==200)return;
+        x.json().then(function(nx){openSession(nx.id,r.title);},function(){});
+      },function(){});
+    };
+    rec.appendChild(el);
+  });
+  if(!d.recent.length)
+    rec.innerHTML='<div style="color:#666;font-size:13px">Nothing yet</div>';
+}
+Array.prototype.forEach.call(document.querySelectorAll('.newbtn'),function(b){
+  b.onclick=function(){
+    var body={kind:b.dataset.kind};
+    if(b.dataset.kind==='claude'&&$('acctsel').value&&$('acctsel').value!=='default')
+      body.account=$('acctsel').value;
+    api('POST','/api/new',body).then(function(x){
+      if(x.status!==200)return x.json().then(function(d){alert(d.error||'failed');},function(){alert('failed');});
+      x.json().then(function(d){openSession(d.id,b.dataset.kind);},function(){});
+    },function(){alert('network error');});
+  };
+});
+</script>
+<script>
+'use strict';
+/* ---------- navigation ---------- */
+function openSession(id,title,replace){
+  sessId=id;sessTitle=title||id;ended=false;retryT=1;
+  showView('v-term');
+  $('ttitle').textContent=title||id;
+  if(replace)history.replaceState({id:id},'', '#s='+id);
+  else history.pushState({id:id}, '', '#s='+id);
+  connect();
+}
+function backToSessions(){
+  if(ws){try{ws.onclose=null;ws.close();}catch(e){}ws=null;}
+  if(retryTimer){clearTimeout(retryTimer);retryTimer=null;}
+  $('banner').classList.remove('show');
+  ended=true;
+  showView('v-sessions');refresh();
+}
+window.addEventListener('popstate',function(){backToSessions();});
+$('back').onclick=function(){
+  if(history.state&&history.state.id)history.back();
+  else{backToSessions();history.replaceState(null,'',location.pathname);}
+};
+$('tkill').onclick=function(){
+  if(!sessId)return;
+  if(confirm('Kill "'+sessTitle+'"?'))
+    api('POST','/api/kill',{id:sessId}).then(function(){backToSessions();},function(){backToSessions();});
+};
+
+/* ---------- terminal ---------- */
+function ensureTerm(){
+  if(term)return;
+  term=new Terminal({fontSize:14,scrollback:20000,cursorBlink:true,
+    theme:{background:'#000'},macOptionIsMeta:true});
+  fit=new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open($('xterm'));
+  term.onData(function(d){
+    if(!d)return;
+    sendInput(applyMods(d));
+    consumeOneShot();
+  });
+}
+function sizeTerm(){
+  if(!term||!$('v-term').classList.contains('active'))return;
+  var vv=window.visualViewport;
+  var top=$('topbar').getBoundingClientRect().height;
+  var bar=$('keybar').getBoundingClientRect().height;
+  var avail=vv?(vv.height+vv.offsetTop):window.innerHeight;
+  $('termwrap').style.height=Math.max(120,avail-top-bar)+'px';
+  try{fit.fit();}catch(e){}
+  sendResize();
+}
+function sendResize(){
+  if(ws&&ws.readyState===1&&term)
+    ws.send(JSON.stringify({t:'resize',cols:term.cols,rows:term.rows}));
+}
+function connect(){
+  if(!sessId)return;
+  ensureTerm();
+  term.reset();
+  var proto=location.protocol==='https:'?'wss:':'ws:';
+  ws=new WebSocket(proto+'//'+location.host+'/ws?id='+encodeURIComponent(sessId));
+  ws.binaryType='arraybuffer';
+  ws.onopen=function(){
+    requestAnimationFrame(sizeTerm);  // size the terminal now that its view is visible (sends the resize too)
+    $('banner').classList.remove('show');
+    retryT=1;
+    if(retryTimer){clearTimeout(retryTimer);retryTimer=null;}
+    sendResize();
+  };
+  ws.onmessage=function(e){
+    if(e.data instanceof ArrayBuffer){term.write(new Uint8Array(e.data));return;}
+    var m;
+    try{m=JSON.parse(e.data);}catch(err){return;}
+    if(m.t==='exit'){
+      ended=true;
+      var b=$('banner');b.textContent='session ended';b.classList.add('show');
+      setTimeout(function(){
+        b.textContent='reconnecting…';
+        backToSessions();
+      },1500);
+    }
+  };
+  ws.onclose=function(){
+    if(ended||ws===null)return;
+    $('banner').classList.add('show');
+    retryTimer=setTimeout(function(){retryT=Math.min(retryT*2,10);connect();},retryT*1000);
+  };
+  ws.onerror=function(){};
+}
+
+/* ---------- key bar ---------- */
+function sendInput(s){
+  if(ws&&ws.readyState===1)ws.send(JSON.stringify({t:'in',d:s}));
+}
+function tapMod(w){
+  var m=mods[w],n=Date.now();
+  if(m.lock){m.lock=false;m.on=false;}
+  else if(n-m.last<350){m.lock=true;m.on=true;}
+  else{m.on=!m.on;}
+  m.last=n;paintMods();
+}
+function consumeOneShot(){
+  var ch=false;
+  ['ctrl','shift'].forEach(function(w){
+    if(mods[w].on&&!mods[w].lock){mods[w].on=false;ch=true;}
+  });
+  if(ch)paintMods();
+}
+function paintMods(){
+  ['ctrl','shift'].forEach(function(w){
+    var btn=document.querySelector('[data-mod="'+w+'"]');
+    btn.classList.toggle('on',mods[w].on&&!mods[w].lock);
+    btn.classList.toggle('lock',mods[w].lock);
+  });
+}
+function modChar(c){
+  if(mods.ctrl.on)return String.fromCharCode(c.toUpperCase().charCodeAt(0)&31);
+  if(mods.shift.on)return c.toUpperCase();
+  return c;
+}
+function applyMods(d){
+  if(d.length===1)return modChar(d);
+  return d;
+}
+function pressKey(k){
+  if(SEQ[k]!==undefined)
+    sendInput((mods.shift.on&&SHIFTED[k])?SHIFTED[k]:SEQ[k]);
+  else
+    sendInput(modChar(k));
+  consumeOneShot();
+}
+var repTimer=null,repKey=null;
+function stopRepeat(){if(repTimer){clearInterval(repTimer);repTimer=null;}repKey=null;}
+Array.prototype.forEach.call(document.querySelectorAll('#kb .k'),function(b){
+  var act=b.dataset.act;
+  if(act==='copy'){b.onclick=showCopy;return;}
+  if(act==='paste'){b.onclick=doPaste;return;}
+  var mod=b.dataset.mod;
+  if(mod){
+    b.addEventListener('pointerdown',function(e){e.preventDefault();tapMod(mod);});
+    return;
+  }
+  var k=b.dataset.k;
+  b.addEventListener('pointerdown',function(e){
+    e.preventDefault();
+    pressKey(k);
+    if(b.classList.contains('rep')){
+      stopRepeat();repKey=k;
+      repTimer=setInterval(function(){
+        if(SEQ[k]!==undefined)sendInput(SEQ[k]);
+      },60);
+    }
+  });
+  b.addEventListener('pointerup',stopRepeat);
+  b.addEventListener('pointercancel',stopRepeat);
+  b.addEventListener('pointerleave',stopRepeat);
+});
+document.addEventListener('pointerup',stopRepeat);
+document.addEventListener('pointercancel',stopRepeat);
+
+/* ---------- copy / paste ---------- */
+function showCopy(){
+  var lines=[];
+  var b=term.buffer.active;
+  for(var i=0;i<b.length;i++){
+    var l=b.getLine(i);
+    if(l)lines.push(l.translateToString(true));
+  }
+  var ta=$('copyta');
+  ta.value=lines.join('\n');
+  $('copyov').classList.add('show');
+}
+$('copyall').onclick=function(){
+  var t=$('copyta').value;
+  if(navigator.clipboard&&navigator.clipboard.writeText)
+    navigator.clipboard.writeText(t).then(hideCopy,hideCopy);
+  else{ta.select();try{document.execCommand('copy');}catch(e){}hideCopy();}
+};
+$('copydone').onclick=hideCopy;
+function hideCopy(){$('copyov').classList.remove('show');}
+function doPaste(){
+  if(navigator.clipboard&&navigator.clipboard.readText)
+    navigator.clipboard.readText().then(function(t){
+      if(t)sendInput(t.replace(/\r\n/g,'\r').replace(/\n/g,'\r'));
+    },function(){});
+}
+
+/* ---------- viewport / keyboard ---------- */
+function updateBar(){
+  var vv=window.visualViewport;
+  if(vv)$('keybar').style.bottom=(window.innerHeight-vv.height-vv.offsetTop)+'px';
+  sizeTerm();
+}
+if(window.visualViewport){
+  window.visualViewport.addEventListener('resize',updateBar);
+  window.visualViewport.addEventListener('scroll',updateBar);
+}
+window.addEventListener('resize',updateBar);
+updateBar();
+start();
+</script>
+</body>
+</html>
