@@ -961,8 +961,12 @@ class Daemon:
                 continue
             cfgdirs.append((acct, os.path.expanduser(
                 '~/.config/kolood/accounts/%s/projects' % acct)))
-        out = []
+        out, seen = [], set()
         for account, projdir in cfgdirs:
+            real = os.path.realpath(projdir)  # accounts share one store (symlink): list each conversation once
+            if real in seen:
+                continue
+            seen.add(real)
             for fp in glob.glob(os.path.join(projdir, '*', '*.jsonl')):
                 item = self.parse_jsonl(fp, account)
                 if item:

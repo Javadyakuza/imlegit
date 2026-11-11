@@ -142,7 +142,7 @@ cwd=$(printf %s "${1:-}" | base64 -d 2>/dev/null || true); shift
 m=1; sh=0; acct=; a=()
 while [ $# -gt 0 ]; do case "$1" in
   --no-remote|--no-mac) m=0;; --mac|--remote) ;; --shell) sh=1;;
-  --account) acct=$2; shift;; --account=*) acct=${1#--account=};;
+  --account|--acc) acct=$2; shift;; --account=*|--acc=*) acct=${1#*=};;
   *) a+=("$1");;
 esac; shift; done
 [ -n "$acct" ] || acct=$(cat "$HOME/.config/kolood/account" 2>/dev/null || true)
@@ -204,6 +204,7 @@ $MARK-end
 EOF
   cat ~/.ssh/kolood_config.old >> ~/.ssh/config; rm -f ~/.ssh/kolood_config.old; chmod 600 ~/.ssh/config
   # Nothing is written to ~/.claude/CLAUDE.md: each `kolood` session is told about the computer via its system prompt (`--no-remote` skips it).
+  for n in $(ls "$ACCTDIR" 2>/dev/null); do acct_share "$n"; done
   web_install "$HOST" || echo "WARNING: phone web terminal not set up (see above); retry: kolood web install"
   if [ $PAIRED = 1 ]; then echo "Paired and connected; refreshed. On your computer type: kolood"; return 0; fi
   if [ $KEEP = 1 ]; then echo "Refreshed. Your computer is not connected right now (asleep/offline?)."; return 0; fi
@@ -291,17 +292,41 @@ PY
 }
 
 acct_dir() { case "$1" in default) echo "$HOME/.claude";; *) echo "$ACCTDIR/$1";; esac; }
+acct_names() { echo default; ls "$ACCTDIR" 2>/dev/null || true; }
+acct_sel() { local s; s=$(cat ~/.config/kolood/account 2>/dev/null || true); echo "${s:-default}"; }
+acct_email() {  # the email Claude saved at /login (default: ~/.claude.json; others: inside their dir)
+  local f; if [ "$1" = default ]; then f=$HOME/.claude.json; else f=$(acct_dir "$1")/.claude.json; fi
+  python3 -c 'import json,sys
+try: print(json.load(open(sys.argv[1])).get("oauthAccount",{}).get("emailAddress",""))
+except Exception: pass' "$f" 2>/dev/null || true
+}
+acct_state() {
+  local e; e="$(acct_dir "$1")/.kolood_env"
+  if grep -q ANTHROPIC_API_KEY "$e" 2>/dev/null; then echo "API key"; elif [ -f "$e" ]; then echo "token (no browser)"
+  elif [ -f "$(acct_dir "$1")/.credentials.json" ]; then echo "logged in (browser)"; else echo "not logged in"; fi
+}
+acct_usedby() {
+  if [ "$1" = "$(acct_sel)" ]; then
+    if [ "$1" = default ]; then echo "kolood"; else echo "kolood  (default now; also: kolood --account $1)"; fi
+  else echo "kolood --account $1"; fi
+}
+# every account uses the same session store, so any account can continue any conversation
+acct_share() {
+  local d; [ "$1" = default ] && return 0
+  d="$(acct_dir "$1")/projects"; mkdir -p ~/.claude/projects
+  [ -L "$d" ] && return 0
+  if [ -d "$d" ]; then if cp -an "$d"/. ~/.claude/projects/; then rm -rf "$d"; else mv "$d" "$d.old.$(date +%s)"; fi; fi
+  ln -s ~/.claude/projects "$d"
+}
 # (server) multiple Claude accounts: "default" is plain ~/.claude; every other NAME is
 # $ACCTDIR/NAME used via CLAUDE_CONFIG_DIR; the selected name lives in ~/.config/kolood/account
 account() {
   case "${1:-}" in
-    list)
-      sel=$(cat ~/.config/kolood/account 2>/dev/null || true); sel=${sel:-default}
-      for n in default $(ls "$ACCTDIR" 2>/dev/null); do
-        e="$(acct_dir "$n")/.kolood_env"
-        if grep -q ANTHROPIC_API_KEY "$e" 2>/dev/null; then s="API key"; elif [ -f "$e" ]; then s="token (no browser login)"
-        elif [ -f "$(acct_dir "$n")/.credentials.json" ]; then s="logged in"; else s="not logged in"; fi
-        if [ "$n" = "$sel" ]; then echo "* $n: $s"; else echo "  $n: $s"; fi
+    list)   # one block per account; * = what plain `kolood` uses
+      for n in $(acct_names); do
+        m=" "; [ "$n" = "$(acct_sel)" ] && m="*"
+        e=$(acct_email "$n")
+        echo "$m $n"; echo "    email:   ${e:-unknown}"; echo "    login:   $(acct_state "$n")"; echo "    used by: $(acct_usedby "$n")"
       done;;
     add)
       shift; n=${1:-}
@@ -309,7 +334,8 @@ account() {
       [ "$n" = default ] && die "'default' is the normal ~/.claude; pick another name"
       [[ "$n" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || die "bad account name: $n (lowercase letters, digits, - or _; max 32)"
       [ -d "$(acct_dir "$n")" ] && die "account $n already exists"
-      mkdir -p "$(acct_dir "$n")"; chmod 700 "$(acct_dir "$n")"
+      mkdir -p "$(acct_dir "$n")"; chmod 700 "$(acct_dir "$n")"; acct_share "$n"
+      echo "created account $n (used by: kolood --account $n)"
       if [ -t 0 ]; then
         m=""; ask "Log in with [b]rowser (/login) or a [t]oken from 'claude setup-token' / API key? [b/t]: " m || true
         case "$m" in [Tt]*) run account token "$n";; *) run account login "$n";; esac
@@ -349,25 +375,47 @@ account() {
       [ -n "$n" ] || die "usage: install.sh account remove NAME"
       [ -d "$(acct_dir "$n")" ] || die "no account $n (see: kolood account list)"
       if [ "$(cat ~/.config/kolood/account 2>/dev/null || true)" = "$n" ]; then rm -f ~/.config/kolood/account; fi
-      rm -rf "$(acct_dir "$n")"
+      rm -f "$(acct_dir "$n")/projects"; rm -rf "$(acct_dir "$n")"   # projects is a link to the shared store: keep the sessions
       echo "removed account $n";;
-    ""|menu)
+    ""|menu)   # list of accounts (+ add); picking one opens its own options
       while :; do
         echo; echo "== Claude accounts on this server =="
-        account list
-        echo " a) add   l) log in (browser)   t) set a token (no browser)   k) set an API key   u) use (make default)   r) remove   0) back"
+        L=($(acct_names)); i=0
+        for n in "${L[@]}"; do
+          i=$((i+1)); e=$(acct_email "$n"); m=""; [ "$n" = "$(acct_sel)" ] && m="   <- default"
+          echo " $i) $n$m"; echo "      ${e:-email unknown} · $(acct_state "$n")"; echo "      used by: $(acct_usedby "$n")"
+        done
+        echo " $((i+1))) + Add a new account"; echo " 0) Back"
         c=""; ask "Choose: " c || return 0
-        n=""
+        if [ "$c" = 0 ]; then return 0
+        elif [ "$c" = "$((i+1))" ]; then n=""; ask "Name for it (Enter = kolood, kolood2, ...): " n || true; run account add "$n"
+        elif [[ "$c" =~ ^[0-9]+$ ]] && [ "$c" -ge 1 ] && [ "$c" -le "$i" ]; then account one "${L[$((c-1))]}"
+        else echo "Pick one of the numbers above."; fi
+      done;;
+    one)   # the options of one account
+      n=${2:-}; [ -d "$(acct_dir "$n")" ] || [ "$n" = default ] || die "no account $n"
+      while [ -d "$(acct_dir "$n")" ] || [ "$n" = default ]; do
+        e=$(acct_email "$n")
+        echo; echo "== Account: $n =="
+        echo "  email:   ${e:-unknown}"; echo "  login:   $(acct_state "$n")"; echo "  used by: $(acct_usedby "$n")"
+        echo "  sessions: shared with every account (any account can continue them)"
+        echo " 1) Make it the default (plain 'kolood' and the phone use it)"
+        echo " 2) Log in with the browser (/login)"
+        echo " 3) Log in with a token (from: claude setup-token; no browser)"
+        echo " 4) Use an API key"
+        echo " 5) Forget the saved token / API key"
+        [ "$n" = default ] || echo " 6) Remove this account"
+        echo " 0) Back"
+        c=""; ask "Choose: " c || return 0
         case "$c" in
-          a) ask "Name (Enter = kolood, kolood2, ...): " n || true; run account add "$n";;
-          l) ask "Account: " n || true; run account login "$n";;
-          t) ask "Account: " n || true; run account token "$n";;
-          k) ask "Account: " n || true; run account apikey "$n";;
-          u) ask "Account: " n || true; run account use "$n";;
-          r) ask "Account: " n || true
-             if yes_no "Remove account $n? [y/N] "; then run account remove "$n"; fi;;
+          1) run account use "$n";;
+          2) run account login "$n";;
+          3) run account token "$n";;
+          4) run account apikey "$n";;
+          5) run account token "$n" off;;
+          6) if [ "$n" != default ] && yes_no "Remove account $n (its login; sessions stay)? [y/N] "; then run account remove "$n"; return 0; fi;;
           0) return 0;;
-          *) echo "Pick one of the letters above.";;
+          *) echo "Pick one of the numbers above.";;
         esac
       done;;
     *) die "usage: install.sh account list|add [NAME]|login NAME|token NAME [TOKEN|off]|apikey NAME [KEY|off]|use NAME|remove NAME";;
@@ -795,34 +843,29 @@ client_menu() {
 server_menu() {
   while :; do
     echo; echo "== kolood: server =="
-    if command -v claude >/dev/null 2>&1 || [ -x ~/.local/bin/claude ]; then echo -n "Claude: installed   "; else echo -n "Claude: NOT installed (1 offers it)   "; fi
+    if command -v claude >/dev/null 2>&1 || [ -x ~/.local/bin/claude ]; then echo -n "Claude: installed   "; else echo -n "Claude: NOT installed (3 offers it)   "; fi
     sel=$(cat ~/.config/kolood/account 2>/dev/null || true); sel=${sel:-default}; echo -n "account: $sel   "
     if [ -s ~/.ssh/kolood_user ]; then
       if ssh -n -o BatchMode=yes -o ConnectTimeout=4 remote true 2>/dev/null; then echo "Paired with $(cat ~/.ssh/kolood_user): connected"
       else echo "Paired with $(cat ~/.ssh/kolood_user): not reachable now (asleep/offline?)"; fi
-    else echo "Not paired yet (choose 1)."; fi
-    echo " 1) Pair a computer / refresh setup"
-    echo " 2) Pair a NEW computer (revokes the old token and keys)"
-    echo " 3) Toggle: Claude may run 'ssh remote' without asking   [now: $(allow status 2>/dev/null || echo ?)]"
-    echo " 4) Import a project's Claude sessions from your computer"
-    echo " 5) Mount your computer's home at ~/remote (sshfs)"
+    else echo "Not paired yet (choose 3)."; fi
+    echo " 1) Accounts (Claude logins)"
+    echo " 2) Phone web terminal (address, password, domain)"
+    echo " 3) Pair a computer / refresh setup"
+    echo " 4) Pair a NEW computer (revokes the old token and keys)"
+    echo " 5) Toggle: Claude may run 'ssh remote' without asking   [now: $(allow status 2>/dev/null || echo ?)]"
     echo " 6) Update kolood"
     echo " 7) Uninstall"
-    echo " 8) Accounts (Claude logins)"
-    echo " 9) Phone web terminal (URL, password, domain)"
     echo " 0) Quit"
     c=""; ask "Choose: " c || exit 0
     case "$c" in
-      1) run server;;
-      2) if yes_no "Forget the current computer and make a new token? [y/N] "; then forget; run server; fi;;
-      3) run allow toggle;;
-      4) p=""; q=""; ask "Project path on your computer (absolute, e.g. /Users/me/proj): " p || true
-         ask "Server path [~/workspace]: " q || true; q=${q/#\~/$HOME}; run pull dir "$p" "${q:-$HOME/workspace}";;
-      5) run mount_remote;;
+      1) run account menu;;
+      2) run web menu;;
+      3) run server;;
+      4) if yes_no "Forget the current computer and make a new token? [y/N] "; then forget; run server; fi;;
+      5) run allow toggle;;
       6) run update;;
       7) if yes_no "Remove kolood from this server? [y/N] "; then remove; exit 0; fi;;
-      8) run account menu;;
-      9) run web menu;;
       0|q|Q) exit 0;;
       *) echo "Pick one of the numbers above.";;
     esac

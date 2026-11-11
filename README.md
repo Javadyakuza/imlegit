@@ -57,7 +57,12 @@ A bare word that isn't a command is rejected (`kolood fix` → use `kolood start
 
 ## Accounts
 
-Several Claude logins can live on the server: `default` (the normal `~/.claude`) plus one config dir per extra account (`~/.config/kolood/accounts/NAME`, used via `CLAUDE_CONFIG_DIR`). `kolood account list` shows who is logged in and which is selected; `add [NAME]`, `login NAME` (opens Claude for `/login`), `use NAME` (server-wide default for new sessions), `remove NAME`. `kolood --account NAME` overrides the selection for one session. Manage from your computer (`kolood account ...`), on the server (`kolood account ...`), or via the menus (your computer: 6, server: 8).
+Several Claude logins can live on the server, like `claude` and `claude2` on one machine: `default` (the normal `~/.claude`) plus one config dir per extra account (`~/.config/kolood/accounts/NAME`, used via `CLAUDE_CONFIG_DIR`).
+
+- **Menu** (`kolood account`, or the menus: your computer 6, server 1): every account on its own lines with its email, how it's logged in, and the command that uses it, plus **+ Add a new account**. Pick an account for its options: make it the default, log in with the browser / a token / an API key, forget the token, remove it.
+- **One-liners**: `kolood account list | add [NAME] | login NAME | token NAME | apikey NAME | use NAME | remove NAME`.
+- **Using one**: plain `kolood` (and the phone) use the default account; `kolood --account NAME` (or `--acc NAME`) picks one for a session.
+- **Shared sessions**: all accounts use one session store, so any account can continue any conversation (`kolood --acc work --resume ID` continues a session started with `default`). Removing an account keeps its sessions.
 
 **Log in without a browser** (like an SSH key for Claude): run `claude setup-token` once on any computer with a browser; it prints a long-lived token. Then `kolood account token NAME` and paste it (hidden; it travels over stdin, never on a command line). Every session of that account starts already logged in. For a pay-per-token Console key: `kolood account apikey NAME`. `kolood account token NAME off` removes it. Stored only on the server, readable only by your user (`~/.config/kolood/accounts/NAME/.kolood_env`, or `~/.claude/.kolood_env` for `default`).
 
