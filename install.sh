@@ -36,19 +36,16 @@ SETUP  (or just `bash install.sh` for the interactive menu)
  1. server:   bash install.sh server       -> prints a pairing token and waits
  2. computer: bash install.sh pair [TOKEN] (macOS: Remote Login ON; Linux/WSL: sshd,
                                             the script offers to install it)
- Later: `kolood --setup` on your computer, `kolood` on the server opens the menu.
+ Later: `kolood` (no arguments) opens the menu, on your computer and on the server.
 
-KOLOOD FLAGS (on your computer; everything else is passed to claude)
- kolood                  Claude on the server; it can work on this computer (`ssh remote`)
- kolood --no-remote         server only; this session is not told about your computer
- kolood --resume [ID]    resume; your computer's sessions (this folder, or that ID)
- kolood --continue       are copied to the server first, so local sessions continue there
- kolood --shell          a login shell on the server instead of Claude
- kolood --account NAME   Claude account NAME on the server (default = ~/.claude)
- kolood -h               kolood help, then claude's own help (passed to the server)
- kolood --setup          the menu: start, pair, restart bridge, update, uninstall
+KOLOOD ON YOUR COMPUTER (`kolood -h` for the full list)
+ kolood                       interactive menu: sessions, accounts, pairing, update, uninstall
+ kolood start [CLAUDE ARGS]   new Claude session on the server (one-liner, no questions)
+ kolood -c | --resume [ID]    continue/resume; this computer's sessions are copied first
+ kolood shell                 a login shell on the server
  kolood account list | add [NAME] | login NAME | use NAME | remove NAME
-                         several Claude logins on the server (`kolood account` = menu)
+ Flags: --account NAME (Claude login on the server), --no-remote (session not told about
+ this computer); any flag also starts Claude directly, e.g. kolood --model opus
 
 SCRIPT COMMANDS: menu | server | pair [TOKEN] | refresh | update | allow on|off|toggle
  | pull dir PATH [SRVPATH] | pull id SESSION_ID | history PATH SRVPATH | mount | remove
@@ -209,7 +206,7 @@ EOF
   TOKEN="kolood1.$(printf '%s\n' "$HOST" "$SPORT" "$(id -un)" "$HK" "$(cut -d' ' -f1,2 ~/.ssh/kolood_to_remote.pub)" "$(grep -v -- ----- ~/.ssh/kolood_tunnel | tr -d '\n')" | base64 | tr -d '\n')"
   printf '\n=== PAIRING TOKEN (secret; paste on your computer) ===\n%s\n\nOn your computer run the same one-liner and choose "Pair", or: bash install.sh pair\n\nWaiting for your computer (Ctrl-C to stop; re-run any time)...\n' "$TOKEN"
   for _ in $(seq 120); do
-    ssh -n -o BatchMode=yes -o ConnectTimeout=3 remote 'echo "connected to $(hostname) as $(whoami)"' 2>/dev/null && { echo "Done. On your computer, type:  kolood   (first run asks you to /login on the server)"; return; }
+    ssh -n -o BatchMode=yes -o ConnectTimeout=3 remote 'echo "connected to $(hostname) as $(whoami)"' 2>/dev/null && { echo "Done. On your computer, type:  kolood start   (first run asks you to /login on the server)"; return; }
     sleep 5
   done
   echo "Not connected yet. Run the pairing step on your computer; then test with: ssh remote hostname"
@@ -463,20 +460,32 @@ EOF
   cat > ~/.local/bin/kolood <<'EOF'
 #!/bin/bash
 # kolood-bridge
-[ "${1:-}" = --setup ] && exec bash "$HOME/.local/share/kolood/install.sh" menu
-case "${1:-}" in -h|--help)
-  echo "kolood: Claude Code on your server, working on this computer"
-  echo "  kolood                      start Claude (in ~/workspace on the server)"
-  echo "  --resume [ID] / -c          resume; local sessions of this folder/ID are copied first"
-  echo "  --no-remote                 this session can't work on your computer"
-  echo "  --shell                     a login shell on the server instead of Claude"
-  echo "  --account NAME              Claude account NAME on the server"
-  echo "  --setup                     the kolood menu"
-  echo "  account list|add [NAME]|login NAME|use NAME|remove NAME"
-  echo "  -h                          this help; everything else is passed to claude"
-  echo "--- Claude Code options (passed through; run on the server) ---";;
+# `kolood` alone = the interactive menu; one-liners (subcommands or flags) = direct, no questions
+I="$HOME/.local/share/kolood/install.sh"
+case "${1:-}" in
+  ""|setup|--setup|menu) exec bash "$I" menu;;
+  -h|--help|help) cat <<'HELP'
+kolood                        interactive menu (sessions, accounts, pairing, update, uninstall)
+One-liners (no questions asked):
+  kolood start [CLAUDE ARGS]  new Claude session on the server  (e.g. kolood start "fix the tests")
+  kolood -c                   continue the last session of this folder (local ones are copied first)
+  kolood --resume [ID]        resume: pick from a list, or that session ID (copied from here if local)
+  kolood shell                a login shell on the server
+  kolood account list | add [NAME] | login NAME | use NAME | remove NAME
+Flags (combine with start / -c / --resume; any other flag also starts Claude directly):
+  --account NAME              use that Claude account on the server
+  --no-remote                 this session is not told about your computer
+  -h, --help                  this help, then Claude's own options
+HELP
+    [ "$1" = help ] && exit 0
+    echo "--- Claude Code options (pass them after 'kolood start'; they run on the server) ---";;
+  start|claude) shift;;
+  shell|--shell) shift; set -- --shell "$@";;
+  account) ;;
+  -*) ;;
+  *) echo "kolood: unknown command '$1'. See: kolood -h   (to start Claude with a prompt: kolood start \"$1\")" >&2; exit 2;;
 esac
-. "$HOME/.ssh/kolood_conf" 2>/dev/null || { echo "kolood is not paired yet: run  kolood --setup"; exit 1; }
+. "$HOME/.ssh/kolood_conf" 2>/dev/null || { echo "kolood is not paired yet: run  kolood  and choose Pair"; exit 1; }
 O=(-t -i "$HOME/.ssh/kolood_login" -o IdentitiesOnly=yes -o UserKnownHostsFile="$HOME/.ssh/kolood_known_hosts" -o StrictHostKeyChecking="$STRICT" -o ServerAliveInterval=30 -p "$port" "$suser@$host")
 if [ "${1:-}" = account ]; then
   shift
@@ -494,7 +503,7 @@ EOF
   for _ in $(seq 12); do
     sleep 3
     if bridge_up; then
-      echo "Ready. In a new terminal (or after: source $RC) type:  kolood      (menu: kolood --setup)"
+      echo "Ready. In a new terminal (or after: source $RC) type:  kolood   (menu)   or   kolood start   (Claude right away)"
       [ $NEWPATH = 1 ] && echo "(added ~/.local/bin to PATH in $RC)"
       is_wsl && echo "WSL: Windows files are under /mnt/c; the bridge runs while WSL is running."
       return 0
@@ -562,30 +571,33 @@ client_menu() {
   while :; do
     echo; echo "== kolood: this computer ($(plat)) =="
     if load_conf; then
-      if bridge_up; then echo "Server $suser@$host:$port   bridge: UP"; else echo "Server $suser@$host:$port   bridge: DOWN (try 4)"; fi
+      if bridge_up; then echo "Server $suser@$host:$port   bridge: UP"; else echo "Server $suser@$host:$port   bridge: DOWN (try 7)"; fi
     elif [ -f ~/.ssh/cmb_run.sh ]; then echo "Old imlegit install found: pair again (on the server: 'Pair a NEW computer')."
-    else echo "Not paired yet: run the server step first, then choose 3."; fi
-    echo " 1) Start Claude on the server        (kolood)"
-    echo " 2) Open a shell on the server        (kolood --shell)"
-    echo " 3) Pair with a server (paste a token)"
-    echo " 4) Restart the bridge"
-    echo " 5) Update kolood (here and on the server)"
-    echo " 6) Toggle: Claude may run 'ssh remote' without asking"
-    echo " 7) Uninstall (here and on the server)"
-    echo " 8) Accounts on the server (Claude logins)"
+    else echo "Not paired yet: run the server step first, then choose 6."; fi
+    echo " 1) New Claude session                (kolood start)"
+    echo " 2) Continue the last session here    (kolood -c)"
+    echo " 3) Pick a session to resume          (kolood --resume)"
+    echo " 4) Shell on the server               (kolood shell)"
+    echo " 5) Accounts on the server            (kolood account)"
+    echo " 6) Pair with a server (paste a token)"
+    echo " 7) Restart the bridge"
+    echo " 8) Update kolood (here and on the server)"
+    echo " 9) Toggle: Claude may run 'ssh remote' without asking"
+    echo "10) Uninstall (here and on the server)"
     echo " 0) Quit"
     c=""; ask "Choose: " c || exit 0
     case "$c" in
-      1|2) if [ -f "$CONF" ]; then [ "$c" = 1 ] && exec "$HOME/.local/bin/kolood"; exec "$HOME/.local/bin/kolood" --shell; else echo "Pair first (3)."; fi;;
-      3) run client;;
-      4) if [ -f "$CONF" ]; then run restart_bridge; else echo "Pair first (3)."; fi;;
-      5) run update;;
-      6) if load_conf; then run rrun allow toggle; else echo "Pair first (3)."; fi;;
-      7) if yes_no "Remove kolood from this computer AND the server? [y/N] "; then
+      1|2|3|4|5) if [ -f "$CONF" ]; then   # run it, then come back to this menu
+           case "$c" in 1) set -- start;; 2) set -- -c;; 3) set -- --resume;; 4) set -- shell;; 5) set -- account menu;; esac
+           "$HOME/.local/bin/kolood" "$@" </dev/tty || true
+         else echo "Pair first (6)."; fi;;
+      6) run client;;
+      7) if [ -f "$CONF" ]; then run restart_bridge; else echo "Pair first (6)."; fi;;
+      8) run update;;
+      9) if load_conf; then run rrun allow toggle; else echo "Pair first (6)."; fi;;
+      10) if yes_no "Remove kolood from this computer AND the server? [y/N] "; then
            if load_conf; then rrun remove || echo "Server not reachable: run 'bash install.sh remove' there."; fi
            remove; exit 0; fi;;
-      8) if [ -f "$CONF" ]; then ssh -t "${SRV[@]}" "bash ~/.local/share/kolood/install.sh account menu" </dev/tty || true
-         else echo "Pair first (3)."; fi;;
       0|q|Q) exit 0;;
       *) echo "Pick one of the numbers above.";;
     esac

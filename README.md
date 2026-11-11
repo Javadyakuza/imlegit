@@ -15,22 +15,34 @@ It opens an **interactive menu** (on Linux it first asks: server or your compute
    - Linux / WSL: needs an SSH server; the script offers to install `openssh-server` with sudo.
    - Windows: install WSL (`wsl --install` in PowerShell), open Ubuntu, and run the one-liner there.
 
-Later, open the menu again with `kolood --setup` (your computer) or `kolood` (server). No commands to remember.
+Later, just type `kolood` (on your computer or on the server) to get the menu again.
 
 ## Use
 
-| On your computer | What it does |
+Two ways, same features:
+
+**Interactive:** type `kolood`. The menu lists: new Claude session, continue the last session here, pick a session to resume, shell on the server, accounts, pair, restart bridge, update, permissions, uninstall. When a session ends you're back in the menu.
+
+**One-liners** (direct, no questions; for scripts, aliases, muscle memory):
+
+| Command | What it does |
 |---|---|
-| `kolood` | Claude Code on the server; it can work on your computer via `ssh remote` |
-| `kolood --resume [ID]` | Resume a session. Your computer's sessions for the **current folder** (or that **ID**) are copied to the server first, so a local session continues there |
-| `kolood --continue` / `-c` | Continue the latest session of the current folder (local ones included) |
-| `kolood --no-remote` | Server only; this session isn't told about your computer (no copying either) |
-| `kolood --shell` | A login shell on the server instead of Claude (`ssh remote` works there too) |
-| `kolood --account NAME` | Run Claude with account NAME on the server (`default` = the usual `~/.claude`) |
-| `kolood account ...` | Manage Claude accounts on the server: `list`, `add [NAME]`, `login NAME`, `use NAME`, `remove NAME` |
-| `kolood -h` | Short kolood help, then `claude --help` |
-| `kolood --setup` | Menu: start, shell, pair, restart bridge, update, toggle permissions, uninstall |
-| anything else | Passed to `claude` (e.g. `kolood --model opus`) |
+| `kolood start [CLAUDE ARGS]` | New Claude session on the server, e.g. `kolood start "fix the tests"` or `kolood start --model opus` |
+| `kolood -c` | Continue the latest session of the current folder. Your computer's sessions for this folder are copied to the server first |
+| `kolood --resume [ID]` | Resume: pick from the list, or that session ID (copied from your computer if it's a local one) |
+| `kolood shell` | A login shell on the server (`ssh remote` works there too) |
+| `kolood account list \| add [NAME] \| login NAME \| use NAME \| remove NAME` | Manage Claude accounts on the server (`kolood account` alone = accounts menu) |
+| `kolood -h` | kolood help, then Claude's own options |
+
+Flags (add to `start`, `-c` or `--resume`):
+
+| Flag | Effect |
+|---|---|
+| `--account NAME` | Use that Claude account on the server for this session |
+| `--no-remote` | This session isn't told about your computer (and nothing is copied) |
+| any Claude flag | Passed to `claude`; a command that starts with a flag starts Claude directly (`kolood --model opus`) |
+
+A bare word that isn't a command is rejected (`kolood fix` → use `kolood start "fix"`), so a typo never sends a prompt by accident.
 
 - First run only: `/login` with your subscription (on the server).
 - Claude is told the folder your terminal is in, and that paths in resumed local sessions live on your computer.
@@ -41,7 +53,7 @@ Later, open the menu again with `kolood --setup` (your computer) or `kolood` (se
 
 ## Accounts
 
-Several Claude logins can live on the server: `default` (the normal `~/.claude`) plus one config dir per extra account (`~/.config/kolood/accounts/NAME`, used via `CLAUDE_CONFIG_DIR`). `kolood account list` shows who is logged in and which is selected; `add [NAME]`, `login NAME` (opens Claude for `/login`), `use NAME` (server-wide default for new sessions), `remove NAME`. `kolood --account NAME` overrides the selection for one session. Manage from your computer (`kolood account ...`), on the server (`kolood account`), or via either menu (option 8).
+Several Claude logins can live on the server: `default` (the normal `~/.claude`) plus one config dir per extra account (`~/.config/kolood/accounts/NAME`, used via `CLAUDE_CONFIG_DIR`). `kolood account list` shows who is logged in and which is selected; `add [NAME]`, `login NAME` (opens Claude for `/login`), `use NAME` (server-wide default for new sessions), `remove NAME`. `kolood --account NAME` overrides the selection for one session. Manage from your computer (`kolood account ...`), on the server (`kolood account ...`), or via the menus (your computer: 5, server: 8).
 
 ## Architecture
 
