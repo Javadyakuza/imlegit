@@ -8,7 +8,7 @@ set -euo pipefail
 MARK="# claude-mac-bridge"; TP=2222; CDP=9222; OS=$(uname)
 ask() { read -r -p "$1" "$2" </dev/tty; }
 b64d() { base64 -d 2>/dev/null || base64 -D; }
-enc() { echo "$1" | sed 's/[^a-zA-Z0-9]/-/g'; }
+enc() { p=${1%/}; echo "${p:-/}" | sed 's/[^a-zA-Z0-9]/-/g'; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 GNUSED=(sed -i); [ "$OS" = Darwin ] && GNUSED=(sed -i '')
 
