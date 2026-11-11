@@ -14,6 +14,7 @@ REASONS = {101: 'Switching Protocols', 200: 'OK', 400: 'Bad Request',
            401: 'Unauthorized', 403: 'Forbidden', 404: 'Not Found',
            413: 'Payload Too Large', 429: 'Too Many Requests',
            500: 'Internal Server Error', 503: 'Service Unavailable'}
+RESTORED_MSG = b'\r\n\x1b[2m[kolood: session restored after a server restart]\x1b[0m\r\n'
 
 
 class WebError(Exception):
@@ -238,6 +239,8 @@ def cmd_attach(argv):
     if not reply.get('ok'):
         print('error: %s' % reply.get('error', 'unknown'), file=sys.stderr)
         sys.exit(1)
+    if reply.get('id'):
+        sid = reply['id']  # remember for reconnect (daemon restart)
 
     resize_flag = [False]
     saved = None
@@ -254,7 +257,35 @@ def cmd_attach(argv):
     except (ValueError, OSError):
         pass
     code = 0
-    stdin_fd = fd
+    try:
+        while True:
+            res = attach_stream(sock, resize_flag)  # None = closed without an exit frame
+            if res is not None:
+                code = res
+                break
+            write_all(1, b'\r\n[kolood: server restarting, reconnecting...]\r\n')
+            sock = reconnect_attach(sid)
+            if sock is None:
+                write_all(1, b'\r\n[kolood: the session did not come back]\r\n')
+                code = 1
+                break
+    finally:
+        if saved is not None:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+            except termios.error:
+                pass
+        try:
+            sock.close()
+        except OSError:
+            pass
+    sys.exit(code)
+
+
+def attach_stream(sock, resize_flag):
+    """Stream one connection. Returns the exit code, or None if the socket
+    closed without a J exit frame (the daemon is going away)."""
+    stdin_fd = sys.stdin.fileno()
     watch = [sock.fileno()]
     if stdin_fd != sock.fileno():
         watch.append(stdin_fd)
@@ -269,14 +300,13 @@ def cmd_attach(argv):
             if sock.fileno() in rset:
                 t, p = recv_frame(sock)
                 if t is None:
-                    break
+                    return None
                 if t == b'D':
                     write_all(1, p)
                 elif t == b'J':
                     msg = json.loads(p or b'{}')
                     if 'exit' in msg:
-                        code = msg['exit'] if isinstance(msg['exit'], int) else 0
-                        break
+                        return msg['exit'] if isinstance(msg['exit'], int) else 0
             if stdin_open and stdin_fd in rset:
                 d = os.read(stdin_fd, 4096)
                 if not d:
@@ -285,15 +315,36 @@ def cmd_attach(argv):
                 else:
                     send_frame(sock, b'D', d)
     except OSError:
-        pass
-    finally:
-        if saved is not None:
-            try:
-                termios.tcsetattr(fd, termios.TCSADRAIN, saved)
-            except termios.error:
-                pass
-        sock.close()
-    sys.exit(code)
+        return None
+
+
+def reconnect_attach(sid):
+    """Retry every 1 s for up to 90 s. Returns a connected socket or None."""
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        time.sleep(1)
+        s = None
+        try:
+            s = connect_daemon()
+            s.settimeout(5)
+            cols, rows = tty_size()
+            send_frame(s, b'J', json.dumps(
+                {'op': 'attach', 'id': sid, 'cols': cols, 'rows': rows}).encode())
+            t, p = recv_frame(s)
+        except OSError:
+            if s:
+                s.close()
+            continue
+        if t == b'J':
+            reply = json.loads(p or b'{}')
+            if reply.get('ok'):
+                s.settimeout(None)
+                return s
+            if 'unknown' in str(reply.get('error', '')):
+                s.close()
+                return None
+        s.close()
+    return None
 
 
 def select_watch(fds):
@@ -461,14 +512,18 @@ def ws_encode(opcode, payload):
 
 
 class Session:
-    def __init__(self, mgr, cmd, cwd, env, name, kind, cols, rows):
+    def __init__(self, mgr, cmd, cwd, env, name, kind, cols, rows, sid=None):
         self.mgr = mgr
         self.loop = mgr.loop
-        self.id = secrets.token_hex(4)
+        self.id = sid or secrets.token_hex(4)
         self.kind = kind
         self.name = name or os.path.basename(cmd[0])
         self.osc_title = None
         self.started = time.time()
+        self.cmd = list(cmd)
+        self.cwd = cwd
+        self.restores = 0
+        self.restored_at = None
         self.cols = cols
         self.rows = rows
         self.clients = set()
@@ -480,6 +535,7 @@ class Session:
         master, slave = os.openpty()
         e = dict(env)
         e.setdefault('TERM', 'xterm-256color')
+        e['KOLOOD_SESSION_FILE'] = mgr.sess_file(self.id)
         self.proc = subprocess.Popen(cmd, stdin=slave, stdout=slave, stderr=slave,
                                      cwd=cwd, env=e, start_new_session=True)
         os.close(slave)
@@ -511,7 +567,10 @@ class Session:
             del self.buf[:nl + 1 if nl >= 0 else excess]
         else:
             self.buf += data
+        prev_title = self.osc_title
         self.tparser.feed(data)
+        if self.osc_title != prev_title:
+            self.mgr.title_changed(self)
         for c in list(self.clients):
             c.write_d(data)
 
@@ -532,6 +591,8 @@ class Manager:
     def __init__(self, daemon):
         self.daemon = daemon
         self.sessions = {}
+        self._title_dirty = False
+        self._title_task = None
 
     @property
     def loop(self):
@@ -546,13 +607,102 @@ class Manager:
         except (TypeError, ValueError):
             return 2097152
 
-    def spawn(self, cmd, cwd, env, name=None, kind='cmd', cols=100, rows=30):
+    # ---- persisted state (sessions.json + sess/) ----------------------------
+
+    def state_path(self):
+        return os.path.join(home_dir(), 'sessions.json')
+
+    def sess_file(self, sid):
+        return os.path.join(home_dir(), 'sess', sid + '.json')
+
+    def buf_file(self, sid):
+        return os.path.join(home_dir(), 'sess', sid + '.buf')
+
+    @staticmethod
+    def ensure_sess_dir():
+        d = os.path.join(home_dir(), 'sess')
+        os.makedirs(d, exist_ok=True)
+        try:
+            os.chmod(d, 0o700)
+        except OSError:
+            pass
+        return d
+
+    def state_entries(self):
+        return [{'id': s.id, 'name': s.name, 'kind': s.kind, 'cmd': s.cmd, 'cwd': s.cwd,
+                 'started': s.started, 'title': s.title, 'restores': s.restores,
+                 'restored_at': s.restored_at}
+                for s in sorted(self.sessions.values(), key=lambda s: s.started)]
+
+    def save_state(self):
+        tmp = self.state_path() + '.tmp'
+        try:
+            with open(tmp, 'w') as f:
+                json.dump(self.state_entries(), f)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, self.state_path())
+        except OSError as e:
+            log('cannot save state: %r' % e)
+
+    def save_buffer(self, sess):
+        try:
+            with open(self.buf_file(sess.id), 'wb') as f:
+                f.write(sess.replay())
+            os.chmod(self.buf_file(sess.id), 0o600)
+        except OSError as e:
+            log('cannot save buffer for %s: %r' % (sess.id, e))
+
+    def preload_buffer(self, sess):
+        try:
+            with open(self.buf_file(sess.id), 'rb') as f:
+                data = f.read()
+        except OSError:
+            return
+        cap = self.buffer_bytes()
+        if cap > 0 and len(data) > cap:
+            data = data[-cap:]
+        sess.buf += data
+        sess.buf += RESTORED_MSG
+        try:
+            os.unlink(self.buf_file(sess.id))
+        except OSError:
+            pass
+
+    def read_sess_meta(self, sid):
+        try:
+            with open(self.sess_file(sid)) as f:
+                v = json.load(f)
+            return v if isinstance(v, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def drop_files(self, sid):
+        for p in (self.sess_file(sid), self.buf_file(sid)):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+
+    def title_changed(self, sess):
+        if self.daemon.shutting_down or sess not in self.sessions:
+            return
+        self._title_dirty = True
+        if self._title_task is None or self._title_task.done():
+            self._title_task = self.loop.create_task(self._save_title_later())
+
+    async def _save_title_later(self):
+        await asyncio.sleep(5)
+        self._title_dirty = False
+        if not self.daemon.shutting_down:
+            self.save_state()
+
+    def spawn(self, cmd, cwd, env, name=None, kind='cmd', cols=100, rows=30, sid=None):
         cfg = self.cfg()
         try:
             max_sessions = int(cfg.get('max_sessions', 20))
         except (TypeError, ValueError):
             max_sessions = 20
-        if len(self.sessions) >= max_sessions:
+        if sid is None and len(self.sessions) >= max_sessions:
             raise WebError('too many sessions (max %d)' % max_sessions)
         if not isinstance(cmd, list) or not cmd or not all(isinstance(x, str) for x in cmd):
             raise WebError('bad cmd')
@@ -561,9 +711,11 @@ class Manager:
         if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str)
                                                 for k, v in env.items()):
             raise WebError('bad env')
-        sess = Session(self, cmd, cwd, env, name, kind, cols, rows)
+        self.ensure_sess_dir()
+        sess = Session(self, cmd, cwd, env, name, kind, cols, rows, sid=sid)
         self.sessions[sess.id] = sess
         log('spawned session %s kind=%s cmd=%s pid=%d' % (sess.id, kind, cmd[0], sess.proc.pid))
+        self.save_state()
         return sess
 
     def kill(self, sid):
@@ -622,10 +774,15 @@ class Manager:
             os.close(sess.master)
         except OSError:
             pass
+        if self.daemon.shutting_down:
+            sess.done = True  # keep it for restore; clients keep silent (no exit frame)
+            return
         for c in list(sess.clients):
             c.send_exit(code)
         sess.clients.clear()
         self.sessions.pop(sess.id, None)
+        self.drop_files(sess.id)
+        self.save_state()
         log('session %s ended code=%s' % (sess.id, code))
 
 
@@ -649,6 +806,8 @@ class Daemon:
         self.fails = {}
         self._gz = {}
         self._cfg_cache = (-1, None)
+        self.shutting_down = False
+        self._stop_evt = None
 
     def cfg(self):
         try:
@@ -664,7 +823,16 @@ class Daemon:
 
     async def run(self):
         self.loop = asyncio.get_running_loop()
+        self._stop_evt = asyncio.Event()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                self.loop.add_signal_handler(sig, self._on_signal)
+            except (NotImplementedError, OSError):
+                pass
         os.makedirs(home_dir(), exist_ok=True)
+        self.mgr.ensure_sess_dir()
+        self.write_ver()
+        self.restore_all()
         sock_path = os.path.join(home_dir(), 'web.sock')
         try:
             os.unlink(sock_path)
@@ -684,7 +852,128 @@ class Daemon:
             self.tls_srv = await asyncio.start_server(self.handle_conn, '0.0.0.0',
                                                       int(tp), ssl=ctx)
             log('listening on 0.0.0.0:%s (TLS)' % tp)
-        await asyncio.Event().wait()
+        await self._stop_evt.wait()
+
+    # ---- shutdown / restore --------------------------------------------------
+
+    def write_ver(self):
+        try:
+            with open(__file__, 'rb') as f:
+                digest = hashlib.sha256(f.read()).hexdigest()
+            with open(os.path.join(home_dir(), 'web.ver'), 'w') as f:
+                f.write(digest)
+        except OSError as e:
+            log('cannot write web.ver: %r' % e)
+
+    def _on_signal(self):
+        if self.shutting_down:
+            return
+        self.shutting_down = True
+        log('shutting down')
+        self.loop.create_task(self._shutdown())
+
+    async def _shutdown(self):
+        self.mgr.save_state()
+        for sess in list(self.mgr.sessions.values()):
+            self.mgr.save_buffer(sess)
+            for c in list(sess.clients):
+                c.close()  # no exit frame: clients will reconnect to the new daemon
+            sess.clients.clear()
+        for sess in list(self.mgr.sessions.values()):
+            try:
+                os.killpg(sess.proc.pid, signal.SIGHUP)
+            except OSError:
+                pass
+        self._stop_evt.set()
+
+    def restore_all(self):
+        try:
+            with open(self.mgr.state_path()) as f:
+                entries = json.load(f)
+        except (OSError, ValueError):
+            return
+        if not isinstance(entries, list):
+            return
+        for e in entries:
+            if not isinstance(e, dict) or not isinstance(e.get('id'), str) \
+                    or '/' in e['id'] or e['id'] in ('.', '..'):
+                continue
+            if not self.restore_one(e):
+                self.mgr.drop_files(e['id'])
+        self.mgr.save_state()
+
+    def restore_one(self, e):
+        try:
+            prev_restores = int(e.get('restores', 0))
+        except (TypeError, ValueError):
+            prev_restores = 0
+        try:
+            ra = float(e['restored_at']) if e.get('restored_at') is not None else None
+        except (TypeError, ValueError):
+            ra = None
+        if prev_restores >= 3 and (ra is None or time.time() - ra < 60):
+            log('crash-loop guard: not restoring session %s' % e['id'])
+            return False
+        cmd = self.restore_cmd(e, self.mgr.read_sess_meta(e['id']))
+        if cmd is None:
+            log('not restoring session %s (kind=%s)' % (e['id'], e.get('kind')))
+            return False
+        cwd = e.get('cwd')
+        if not cwd or not os.path.isdir(cwd):
+            cwd = os.path.expanduser('~/workspace')
+            try:
+                os.makedirs(cwd, exist_ok=True)
+            except OSError:
+                pass
+        env = dict(os.environ)
+        env['KOLOOD_INSIDE'] = '1'
+        env['TERM'] = 'xterm-256color'
+        env.setdefault('LANG', 'C.UTF-8')
+        try:
+            sess = self.mgr.spawn(cmd, cwd, env, name=e.get('name'),
+                                  kind=e.get('kind') or 'cmd', sid=e['id'])
+        except (WebError, OSError, TypeError, ValueError) as ex:
+            log('cannot restore session %s: %r' % (e['id'], ex))
+            return False
+        sess.restores = prev_restores + 1
+        sess.restored_at = time.time()
+        if e.get('title'):
+            sess.osc_title = str(e['title'])
+        self.mgr.preload_buffer(sess)
+        self.loop.create_task(self._restored_lived(sess))
+        log('restored session %s restores=%d' % (sess.id, sess.restores))
+        return True
+
+    @staticmethod
+    def restore_cmd(e, meta):
+        """Build the command for a restored session, or None to not restore."""
+        cmd = e.get('cmd')
+        if not isinstance(cmd, list) or not cmd or not all(isinstance(x, str) for x in cmd):
+            return None
+        is_start = cmd[0].endswith('kolood_start')
+        if is_start and meta.get('claude_id'):
+            out = [cmd[0], cmd[1] if len(cmd) > 1 else '']
+            if meta.get('no_remote'):
+                out.append('--no-remote')
+            account = meta.get('account')
+            if account and account != 'default':
+                out += ['--account', str(account)]
+            out += ['--resume', str(meta['claude_id'])]
+            return out
+        if is_start:  # a Claude session without a known conversation id is not re-run (its args may hold a prompt)
+            return list(cmd) if '--shell' in cmd else None
+        if e.get('kind') in ('shell', 'remote'):
+            return list(cmd)
+        # anything else only if it is a plain interactive shell (never re-run an arbitrary command or script)
+        if os.path.basename(cmd[0]) in ('sh', 'bash', 'zsh', 'dash', 'fish', 'ksh') and all(x.startswith('-') and x != '-c' for x in cmd[1:]):
+            return list(cmd)
+        return None
+
+    async def _restored_lived(self, sess):
+        await asyncio.sleep(60)
+        if self.mgr.sessions.get(sess.id) is sess and not self.shutting_down:
+            sess.restores = 0  # it survived: restart the crash-loop counter
+            self.mgr.save_state()
 
     # ---- unix socket
 

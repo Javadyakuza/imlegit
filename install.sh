@@ -156,9 +156,8 @@ E="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.kolood_env"; if [ -f "$E" ]; then set -a
 mkdir -p "$HOME/workspace"; cd "$HOME/workspace"
 [ $sh = 1 ] && exec "${SHELL:-/bin/bash}" -l
 command -v claude >/dev/null || { echo "Claude Code is not installed on this server. Install it: curl -fsSL https://claude.ai/install.sh | bash"; exit 1; }
-[ $m = 1 ] || exec claude "${a[@]}"
 # resuming: copy the matching sessions from the user's computer first, so --resume ID, the picker and --continue see them
-if [ -f "$I" ]; then
+if [ $m = 1 ] && [ -f "$I" ]; then
   n=${#a[@]}
   for ((i=0; i<n; i++)); do case "${a[i]}" in
     -r|--resume) nx="${a[i+1]:-}"
@@ -167,6 +166,27 @@ if [ -f "$I" ]; then
     -c|--continue) [ -n "$cwd" ] && bash "$I" pull dir "$cwd";;
   esac; done
 fi
+# inside the session holder: tell it which conversation this is, so it can resume it after a server restart
+if [ -n "${KOLOOD_SESSION_FILE:-}" ]; then
+  sid=""; rs=0; n=${#a[@]}
+  for ((i=0; i<n; i++)); do case "${a[i]}" in
+    -r|--resume) rs=1; [[ "${a[i+1]:-}" =~ ^[0-9a-fA-F-]{8,}$ ]] && sid=${a[i+1]};;
+    --resume=*) rs=1; sid=${a[i]#--resume=};;
+    --session-id) rs=1; sid=${a[i+1]:-};;
+    -c|--continue) rs=1
+      P="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(printf %s "$PWD" | sed 's/[^a-zA-Z0-9]/-/g')"
+      f=$(ls -t "$P"/*.jsonl 2>/dev/null | head -n 1); [ -n "$f" ] && sid=$(basename "$f" .jsonl);;
+  esac; done
+  # a new conversation: pick its id now (only if this Claude version knows --session-id; checked once per version)
+  if [ $rs = 0 ]; then
+    C=$(readlink -f "$(command -v claude)"); K="$HOME/.config/kolood/claude-sid-$(stat -c %Y "$C" 2>/dev/null)"
+    [ -f "$K" ] || { mkdir -p "${K%/*}"; if claude --help 2>&1 | grep -q -- --session-id; then echo yes; else echo no; fi > "$K"; }
+    if [ "$(cat "$K")" = yes ]; then sid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c 'import uuid;print(uuid.uuid4())'); a+=(--session-id "$sid"); fi
+  fi
+  if [ -n "$sid" ]; then nr=false; [ $m = 0 ] && nr=true
+    printf '{"claude_id":"%s","account":"%s","no_remote":%s}\n' "$sid" "${acct:-default}" "$nr" > "$KOLOOD_SESSION_FILE"; fi
+fi
+[ $m = 1 ] || exec claude "${a[@]}"
 exec claude --append-system-prompt "You are on a server. The user is working on a remote machine, reached with: ssh remote '<cmd>' (it may be offline). Their working folder there is $cwd. Each call is a fresh shell, so use absolute paths or 'cd dir && cmd'. Their files and paths, including those in a resumed conversation, are on the remote." "${a[@]}"
 START
   chmod 700 ~/.ssh/kolood_start
@@ -443,11 +463,15 @@ web_running() { python3 "$WPY" status >/dev/null 2>&1; }
 sudo_ok() { [ "$(id -u)" = 0 ] && SUDO="" && return 0; command -v sudo >/dev/null && sudo -n true 2>/dev/null && SUDO=sudo && return 0; return 1; }
 
 web_service() {  # (re)start the daemon; keeps it running when sessions are open unless forced
-  if web_running && [ "${1:-}" != force ] && [ -n "$(python3 "$WPY" list 2>/dev/null)" ]; then
-    echo "web: kept running ($(python3 "$WPY" list | wc -l | tr -d ' ') open sessions); apply updates later with: kolood web restart"; return 0; fi
+  # the daemon writes the hash of its code to web.ver: same code = nothing to restart
+  if web_running && [ "${1:-}" != force ]; then
+    if [ "$(cat ~/.config/kolood/web.ver 2>/dev/null)" = "$(sha256sum "$WPY" | cut -d' ' -f1)" ]; then return 0; fi
+    if [ -n "$(python3 "$WPY" list 2>/dev/null)" ]; then
+      echo "web: new version installed; open sessions keep running on the old one until: kolood web restart (they are restored after it)"; return 0; fi
+  fi
   if systemctl --user show-environment >/dev/null 2>&1; then
     mkdir -p ~/.config/systemd/user
-    printf '[Unit]\nDescription=kolood web terminal + session holder\nStartLimitIntervalSec=0\n[Service]\nExecStart=%s %s serve\nRestart=always\nRestartSec=3\n[Install]\nWantedBy=default.target\n' "$(command -v python3)" "$WPY" > ~/.config/systemd/user/$WUNIT
+    printf '[Unit]\nDescription=kolood web terminal + session holder\nStartLimitIntervalSec=0\n[Service]\nExecStart=%s %s serve\nRestart=always\nRestartSec=3\nKillMode=mixed\nTimeoutStopSec=15\n[Install]\nWantedBy=default.target\n' "$(command -v python3)" "$WPY" > ~/.config/systemd/user/$WUNIT
     systemctl --user daemon-reload; systemctl --user enable "$WUNIT" >/dev/null 2>&1; systemctl --user restart "$WUNIT"
     loginctl enable-linger "$(id -un)" 2>/dev/null || true
   else
@@ -543,7 +567,7 @@ web() {
           p) run web password;;
           d) n=""; ask "Domain (its DNS A record must point to this server): " n || true; run web domain "$n";;
           o) run web domain off;;
-          r) if yes_no "Restarting ends all open sessions. Restart? [y/N] "; then run web restart; fi;;
+          r) if yes_no "Restart? Open sessions come back by themselves (a Claude reply in progress is cut off). [y/N] "; then run web restart; fi;;
           0) return 0;;
           *) echo "Pick one of the letters above.";;
         esac
@@ -562,7 +586,7 @@ bridge_up() { ssh -n -o BatchMode=yes "${SRV[@]}" 'ssh -o BatchMode=yes -o Conne
 # run this script on the server (uploads this copy first, so both sides match)
 rrun() {
   ssh -o BatchMode=yes "${SRV[@]}" 'mkdir -p ~/.local/share/kolood && cat > ~/.local/share/kolood/install.sh.new && mv ~/.local/share/kolood/install.sh.new ~/.local/share/kolood/install.sh' < "$I" \
-    && ssh -t "${SRV[@]}" "bash ~/.local/share/kolood/install.sh $*" </dev/tty
+    && ssh -t "${SRV[@]}" "${KOLOOD_URL:+KOLOOD_URL=$(printf %q "$KOLOOD_URL") }bash ~/.local/share/kolood/install.sh $*" </dev/tty   # a custom update source applies to the server too
 }
 logs_hint() {
   if [ "$OS" != Darwin ] && systemctl --user show-environment >/dev/null 2>&1; then echo "journalctl --user -u $UNIT"; else echo "$LOG"; fi

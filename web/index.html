@@ -339,9 +339,15 @@ function connect(){
       },1500);
     }
   };
-  ws.onclose=function(){
+  ws.onclose=function(e){
     if(ended||ws===null)return;
-    $('banner').classList.add('show');
+    if(e&&e.code===4404){  // unknown id: the session did not come back
+      ended=true;
+      var b=$('banner');b.textContent='session ended';b.classList.add('show');
+      setTimeout(function(){backToSessions();},1500);
+      return;
+    }
+    $('banner').textContent='reconnecting…';$('banner').classList.add('show');
     retryTimer=setTimeout(function(){retryT=Math.min(retryT*2,10);connect();},retryT*1000);
   };
   ws.onerror=function(){};

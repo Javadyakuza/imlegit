@@ -144,7 +144,7 @@ Env: `KOLOOD_HOST` / `KOLOOD_PORT` override the auto-detected server address; `K
 - Chrome control needs Chrome started with `--remote-debugging-port=9222`. Screen control is not bridged.
 - Clients: macOS, Linux (systemd user service, or a background loop without systemd), Windows via WSL (the bridge runs while WSL runs; Windows files are under `/mnt/c`). Native Windows shells are not supported. Server: Linux with OpenSSH 7.8+.
 - Installs made before the menu existed: pair once more (server menu > *Pair a NEW computer*).
-- Running sessions live in the web daemon: restarting it (`kolood web restart`, a server reboot) ends them. Updates keep it running while sessions are open. Your Claude conversations are saved by Claude as usual, so they can be resumed.
+- Sessions survive a daemon restart, an update or a server reboot: the daemon remembers them and reopens each one (same id, so the phone and `kolood attach` reconnect by themselves). Claude sessions continue their conversation (`--resume`); shells come back as a fresh shell in the same folder. What was running at that moment (a command, a Claude reply being written) is cut off. Updates restart the daemon only when its code changed, and not while sessions are open.
 - The phone page needs Python 3 on the server (standard on Ubuntu/Debian) and downloads xterm.js once at install.
 
 ## Terms

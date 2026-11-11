@@ -5,9 +5,11 @@ import http.client
 import json
 import os
 import pty
+import select
 import shutil
 import socket
 import struct
+import signal
 import subprocess
 import sys
 import tempfile
@@ -141,11 +143,21 @@ class Base(unittest.TestCase):
             json.dump({'port': self.port, 'commands': {'shell': ['/bin/sh']}}, f)
         r = self.run_cli('passwd', 'X')
         self.assertEqual(r.returncode, 0, r.stderr)
-        env = self.daemon_env()
-        self.errfile = open(os.path.join(self.tmp, 'daemon.log'), 'w')
-        self.proc = subprocess.Popen([PY, WEB, 'serve'], env=env,
+        self.errfiles = []
+        self.errfile = None
+        self.proc = None
+        self.start_daemon()
+
+    def start_daemon(self):
+        self.errfile = open(os.path.join(self.tmp, 'daemon.log'), 'a')
+        self.errfiles.append(self.errfile)
+        self.proc = subprocess.Popen([PY, WEB, 'serve'], env=self.daemon_env(),
                                      stdout=self.errfile, stderr=self.errfile)
         self.wait_ready()
+
+    def stop_daemon(self):
+        self.proc.terminate()
+        self.proc.wait(timeout=15)
 
     def daemon_env(self):
         env = dict(os.environ)
@@ -170,13 +182,15 @@ class Base(unittest.TestCase):
                   open(os.path.join(self.tmp, 'daemon.log')).read())
 
     def tearDown(self):
-        self.proc.terminate()
-        try:
-            self.proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
-            self.proc.wait()
-        self.errfile.close()
+        if self.proc:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+        for f in self.errfiles:
+            f.close()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def run_cli(self, *args):
@@ -449,6 +463,168 @@ class TestValidation(Base):
                 os.remove(f)
             if made:
                 os.rmdir(d)
+
+
+class TestRestore(Base):
+    def test_restore_shell(self):
+        cookie = self.login()
+        sid = self.new_session(cookie)
+        ws = WSClient(self.port, '/ws?id=' + sid, cookie=cookie)
+        ws.send_text(json.dumps({'t': 'in', 'd': 'echo BEFORE-RESTART\r'}))
+        ws.recv_until('BEFORE-RESTART')
+        ws.close()
+        self.stop_daemon()
+        self.start_daemon()
+        d = self.sessions(cookie)
+        self.assertTrue([s for s in d['running'] if s['id'] == sid])
+        ws2 = WSClient(self.port, '/ws?id=' + sid, cookie=cookie)
+        self.assertEqual(ws2.status, 101)
+        text = ws2.recv_until('session restored')
+        self.assertIn('BEFORE-RESTART', text)
+        ws2.send_text(json.dumps({'t': 'in', 'd': 'echo AFTER-RESTART\r'}))
+        ws2.recv_until('AFTER-RESTART')
+        ws2.close()
+
+    def test_restore_claude(self):
+        script = os.path.join(self.tmp, 'kolood_start')
+        with open(script, 'w') as f:
+            f.write('#!/bin/sh\n'
+                    'printf \'{"claude_id":"abc-123","account":"work"}\\n\' '
+                    '> "$KOLOOD_SESSION_FILE"\n'
+                    'echo "argv: $*"\n'
+                    'sleep 60\n')
+        os.chmod(script, 0o755)
+        cfgp = os.path.join(self.home, 'web.json')
+        with open(cfgp) as f:
+            cfg = json.load(f)
+        cfg['commands'] = {'claude': [script, '', 'PROMPTTEXT']}
+        with open(cfgp, 'w') as f:
+            json.dump(cfg, f)
+        cookie = self.login()
+        sid = self.new_session(cookie, {'kind': 'claude'})
+        ws = WSClient(self.port, '/ws?id=' + sid, cookie=cookie)
+        ws.recv_until('PROMPTTEXT')
+        ws.close()
+        self.stop_daemon()
+        self.start_daemon()
+        d = self.sessions(cookie)
+        self.assertTrue([s for s in d['running'] if s['id'] == sid])
+        ws2 = WSClient(self.port, '/ws?id=' + sid, cookie=cookie)
+        self.assertEqual(ws2.status, 101)
+        text = ws2.recv_until('session restored')
+        post = text.split('session restored', 1)[1]
+        deadline = time.time() + 10
+        while '--resume abc-123' not in post and time.time() < deadline:
+            kind, p = ws2.next_data(max(0.1, deadline - time.time()))
+            if kind == 'close':
+                self.fail('closed while waiting for resume argv, got: ' + post)
+            post += p.decode('utf-8', 'replace')
+        self.assertIn('--account work --resume abc-123', post)
+        self.assertNotIn('PROMPTTEXT', post)
+        ws2.close()
+
+    def test_no_restore_after_exit(self):
+        cookie = self.login()
+        sid = self.new_session(cookie)
+        ws = WSClient(self.port, '/ws?id=' + sid, cookie=cookie)
+        ws.send_text(json.dumps({'t': 'in', 'd': 'exit\r'}))
+        self.poll_sessions(cookie, lambda d: all(s['id'] != sid for s in d['running']))
+        ws.close()
+        self.stop_daemon()
+        self.start_daemon()
+        d = self.sessions(cookie)
+        self.assertFalse([s for s in d['running'] if s['id'] == sid])
+
+    def test_crash_loop(self):
+        self.stop_daemon()
+        counter = os.path.join(self.tmp, 'runs')
+        crash = os.path.join(self.tmp, 'crash.sh')
+        with open(crash, 'w') as f:
+            f.write('#!/bin/sh\necho ran >> %s\n' % counter)
+        os.chmod(crash, 0o755)
+        state = os.path.join(self.home, 'sessions.json')
+        entry = {'id': 'crash01', 'name': 'crash', 'kind': 'shell', 'cmd': [crash],
+                 'cwd': self.tmp, 'started': time.time(), 'title': 'crash',
+                 'restores': 0, 'restored_at': None}
+
+        def runs():
+            try:
+                with open(counter) as f:
+                    return len(f.read().split())
+            except OSError:
+                return 0
+
+        with open(state, 'w') as f:
+            json.dump([entry], f)
+        for _ in range(4):
+            self.start_daemon()
+            time.sleep(1.0)
+            self.stop_daemon()
+        self.assertLessEqual(runs(), 3)
+        # direct guard check: restores>=3 and no 60 s lifetime -> skipped
+        entry['restores'] = 3
+        entry['restored_at'] = time.time() - 10
+        n = runs()
+        with open(state, 'w') as f:
+            json.dump([entry], f)
+        self.start_daemon()
+        time.sleep(1.0)
+        self.assertEqual(runs(), n)
+        with open(state) as f:
+            self.assertEqual(json.load(f), [])
+        self.stop_daemon()
+
+    def test_attach_reconnect(self):
+        pid, fd = pty.fork()
+        if pid == 0:  # child
+            os.environ.update(self.daemon_env())
+            os.execv(PY, [PY, WEB, 'attach', '--', '/bin/sh'])
+        out = b''
+
+        def pump(substr, timeout):
+            nonlocal out
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if substr in out:
+                    return
+                r, _, _ = select.select([fd], [], [], 0.3)
+                if fd in r:
+                    try:
+                        d = os.read(fd, 4096)
+                    except OSError:
+                        break
+                    if not d:
+                        break
+                    out += d
+            self.assertIn(substr.decode(), out.decode('utf-8', 'replace'))
+
+        try:
+            pump(b'$ ', 15)
+            self.stop_daemon()
+            pump(b'reconnecting', 15)
+            self.start_daemon()
+            os.write(fd, b'echo RECONNECTED\n')
+            pump(b'RECONNECTED', 20)
+        finally:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                os.waitpid(pid, 0)
+            except (ChildProcessError, OSError):
+                pass
+
+    def test_web_ver(self):
+        with open(os.path.join(self.home, 'web.ver')) as f:
+            ver = f.read().strip()
+        with open(WEB, 'rb') as f:
+            want = hashlib.sha256(f.read()).hexdigest()
+        self.assertEqual(ver, want)
 
 
 if __name__ == '__main__':
