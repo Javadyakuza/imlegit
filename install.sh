@@ -161,7 +161,7 @@ fresh() { if awk -v p="$1" '$2 == p && $3 ~ /^fuse/ {f=1} END {exit !f}' /proc/m
 if [ $m = 1 ] && [ $sh = 0 ] && [ $srv = 0 ] && [ -n "$cwd" ] && [ -f "$D" ]; then
   why=""
   if ! command -v sshfs >/dev/null; then why="sshfs is not installed on the server (kolood update installs it)"
-  elif ! INFO=$(python3 "$D" info 2>/dev/null); then why="your computer is not reachable"
+  elif ! INFO=$(timeout 30 python3 "$D" info 2>/dev/null); then why="your computer is not reachable"
   else
     eval "$(printf %s "$INFO" | python3 -c 'import json,sys,shlex;d=json.load(sys.stdin);print("DH=%s DOS=%s DRG=%d DGIT=%d"%(shlex.quote(d["home"]),shlex.quote(d["os"]),bool(d["rg"]),bool(d["git"])))')"
     case "$DH" in ""|/|"$HOME"|"$HOME"/*) why="your computer's home ($DH) overlaps the server's";; esac
@@ -315,7 +315,7 @@ pull() {
   mkdir -p "$dst"; d="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(enc "$(cd "$dst" && pwd -P)")"; mkdir -p "$d"
   K=""; tar --help 2>&1 | grep -q keep-newer-files && K=--keep-newer-files   # a session continued here stays
   set +e
-  ssh -o BatchMode=yes -o ConnectTimeout=5 remote sh -s -- "$mode" "$arg" "$cfg" <<'R' | tar -xf - -C "$d" $K 2>/dev/null
+  timeout 120 ssh -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 remote sh -s -- "$mode" "$arg" "$cfg" <<'R' | tar -xf - -C "$d" $K 2>/dev/null
 export COPYFILE_DISABLE=1
 cd "$HOME" && cd "$3/projects" 2>/dev/null || exit 3
 if [ "$1" = id ]; then

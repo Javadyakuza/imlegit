@@ -95,8 +95,10 @@ class DevBase(unittest.TestCase):
         e.update(self.base_env)
         if env:
             e.update(env)
+        # no inherited stdin: a pipe/file from the caller (ssh, CI) would count as "piped data"
         return subprocess.run([PY, DEV] + list(args), env=e, cwd=cwd,
-                              input=input, capture_output=True, timeout=timeout)
+                              input=input, stdin=None if input is not None else subprocess.DEVNULL,
+                              capture_output=True, timeout=timeout)
 
 
 class TestShell(DevBase):

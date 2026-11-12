@@ -76,7 +76,10 @@ def dev_root():
 
 
 def ssh_argv(remote_cmd):
-    return [ssh_prog(), '-T', '-o', 'BatchMode=yes', remote_alias(), remote_cmd]
+    # fail fast on a dead tunnel / stale ControlMaster instead of hanging for minutes
+    return [ssh_prog(), '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8',
+            '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=3',
+            remote_alias(), remote_cmd]
 
 
 def inside_root(cwd):
@@ -281,8 +284,8 @@ def cmd_open(args):
 def cmd_info():
     try:
         p = subprocess.run(ssh_argv(INFO_SCRIPT), stdout=subprocess.PIPE,
-                           stderr=subprocess.DEVNULL)
-    except OSError as e:
+                           stderr=subprocess.DEVNULL, timeout=20)
+    except (OSError, subprocess.TimeoutExpired) as e:
         print('kolood: %s' % e, file=sys.stderr)
         sys.exit(1)
     if p.returncode != 0:
