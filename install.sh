@@ -207,6 +207,8 @@ else
   mkdir -p "$HOME/workspace"; cd "$HOME/workspace"
 fi
 [ $sh = 1 ] && exec "${SHELL:-/bin/bash}" -l
+# Claude's fullscreen mouse mode captures drags, so text can't be selected/copied in the user's terminal (over ssh); a user can override
+: "${CLAUDE_CODE_DISABLE_MOUSE:=1}"; export CLAUDE_CODE_DISABLE_MOUSE
 command -v claude >/dev/null || { echo "Claude Code is not installed on this server. Install it: curl -fsSL https://claude.ai/install.sh | bash"; exit 1; }
 # resuming: copy the matching sessions from the user's computer first, so --resume ID, the picker and --continue see them
 if [ $m = 1 ] && [ -f "$I" ]; then
