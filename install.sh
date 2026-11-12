@@ -501,6 +501,7 @@ account() {
 }
 
 # ---------------------------------------------------------------- local mode (server): stand-ins + sshfs
+# apt installs: NEEDRESTART_SUSPEND / noninteractive / no stdin, so Ubuntu's restart prompts can't wait unseen
 local_install() {
   local S=$HOME/.local/share/kolood/shims D='"$HOME/.local/share/kolood/web/kolood_device.py"'
   mkdir -p "$S"
@@ -512,7 +513,7 @@ local_install() {
   printf '#!/bin/sh\nexec python3 %s wl-paste "$@"\n' "$D" > "$S/wl-paste"
   chmod 755 "$S"/*
   if ! command -v sshfs >/dev/null || ! command -v bindfs >/dev/null; then
-    if sudo_ok && command -v apt-get >/dev/null; then echo "Installing sshfs + bindfs (lets Claude work in your folders directly)..."; $SUDO apt-get install -y sshfs bindfs >/dev/null 2>&1 || true; fi
+    if sudo_ok && command -v apt-get >/dev/null; then echo "Installing sshfs + bindfs (lets Claude work in your folders directly)..."; $SUDO env DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y sshfs bindfs </dev/null >/dev/null 2>&1 || true; fi
     command -v sshfs >/dev/null || echo "NOTE: sshfs is not installed: kolood works in ~/workspace on the server instead of in your folders (install: apt install sshfs)"
     command -v bindfs >/dev/null || echo "NOTE: bindfs is not installed: Claude's own settings show at a server path, and your computer's skills/CLAUDE.md aren't used (install: apt install bindfs)"
   fi
@@ -630,7 +631,7 @@ web_domain() {  # put the page on a domain with automatic HTTPS (Caddy; needs ro
   fi
   if ss -ltnp 2>/dev/null | grep -E ':(80|443)\b' | grep -vq caddy; then
     die "port 80/443 is used by another web server; point it at 127.0.0.1:7700 yourself (reverse proxy with WebSocket)"; fi
-  command -v caddy >/dev/null || { echo "Installing Caddy..."; $SUDO apt-get update -qq && $SUDO apt-get install -y caddy >/dev/null; } || die "could not install caddy (apt). Install it, then retry"
+  command -v caddy >/dev/null || { echo "Installing Caddy..."; $SUDO apt-get update -qq && $SUDO env DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y caddy </dev/null >/dev/null; } || die "could not install caddy (apt). Install it, then retry"
   # the stock Caddyfile only serves a placeholder page: replace it; otherwise add our block
   if [ ! -f "$cf" ] || grep -q /usr/share/caddy "$cf"; then echo "" | $SUDO tee "$cf" >/dev/null; fi
   $SUDO sed -i "/$MARK\$/,/$MARK-end/d" "$cf"
@@ -704,7 +705,7 @@ need_sshd() {
     if [ "$OS" = Darwin ]; then
       echo "-> Turn ON: System Settings > General > Sharing > Remote Login"; ask "   Press Enter once it is on: " _
     elif [ $tried = 0 ] && command -v apt-get >/dev/null && yes_no "No SSH server (sshd) here. Install and start openssh-server with sudo now? [y/N] "; then
-      tried=1; { sudo apt-get update -qq && sudo apt-get install -y openssh-server && { sudo systemctl enable --now ssh 2>/dev/null || sudo service ssh start; }; } || true
+      tried=1; { sudo apt-get update -qq && sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y openssh-server </dev/null && { sudo systemctl enable --now ssh 2>/dev/null || sudo service ssh start; }; } || true
     else
       tried=1; echo "-> Install and start an SSH server on port 22 (openssh-server; WSL: sudo service ssh start)"; ask "   Press Enter once it runs: " _
     fi
