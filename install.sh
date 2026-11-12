@@ -811,6 +811,7 @@ One-liners (no questions asked):
   kolood shell                a login shell on the server
   kolood chrome on|off        let Claude drive Chrome on this computer (needs Node.js on the server)
   kolood sessions             running sessions on the server (also visible on the phone page)
+  kolood history [FOLDER]     recent conversations (id, age, folder, title); resume one: kolood --resume ID
   kolood attach [ID]          join a running session (pick from a list without ID)
   kolood web [status | password [PW] | domain NAME | domain off | restart]   the phone page
   kolood account list | add [NAME] | login NAME | use NAME | remove NAME
@@ -825,7 +826,7 @@ HELP
     echo "--- Claude Code options (pass them after 'kolood start'; they run on the server) ---";;
   start|claude) shift;;
   shell|--shell) shift; set -- --shell "$@";;
-  account|web|sessions|attach|chrome) ;;
+  account|web|sessions|history|attach|chrome) ;;
   -*) ;;
   *) echo "kolood: unknown command '$1'. See: kolood -h   (to start Claude with a prompt: kolood start \"$1\")" >&2; exit 2;;
 esac
@@ -844,6 +845,7 @@ O=(-t "${O[@]}")
 case "${1:-}" in
   account|web|chrome) exec ssh "${O[@]}" "bash ~/.local/share/kolood/install.sh$(printf ' %q' "$@")";;
   sessions) exec ssh "${O[@]}" "$WP list";;
+  history) shift; ssh "${O[@]}" "$WP history$(printf ' %q' "$@")" | awk -F'\t' '{printf "%s  %4s  %s  %s\n", $1, $2, $3, $4}'; exit "${PIPESTATUS[0]}";;
   attach) id=${2:-}
     if [ -z "$id" ]; then   # pick one
       L=$(ssh "${O[@]}" "$WP list" 2>/dev/null | tr -d '\r'); [ -n "$L" ] || { echo "No running sessions on the server."; exit 1; }

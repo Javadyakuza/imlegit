@@ -708,6 +708,20 @@ class TestConfigRouting(DevBase):
         self.assertIn(b'SRV-OK', r.stdout)
         self.assertEqual(self.log_lines(), [])
 
+    def test_snapshot_under_view_runs_on_device(self):
+        cmd = 'source %s/shell-snapshots/s.sh 2>/dev/null || true && echo DEV-OK4' % self.view
+        before = len(self.log_lines())
+        r = self.run_dev(['shell', cmd], cwd=self.root, env=self.cfg_env)
+        self.assertIn(b'DEV-OK4', r.stdout)
+        self.assertEqual(len(self.log_lines()), before + 1)
+
+    def test_missing_on_server_non_owned_runs_on_device(self):
+        before = len(self.log_lines())
+        r = self.run_dev(['shell', 'cat %s/orch/run.sh; echo DEV-OK5' % self.view],
+                         cwd=self.root, env=self.cfg_env)
+        self.assertIn(b'DEV-OK5', r.stdout)
+        self.assertEqual(len(self.log_lines()), before + 1)
+
     def test_mixed_routes_to_server(self):
         cmd = 'cat %s/skills/devskill/x.sh %s/plugins/x; echo SRV-OK' % (
             self.view, self.view)

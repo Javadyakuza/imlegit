@@ -19,6 +19,8 @@ UNREACHABLE = 'kolood: your computer is not reachable (asleep or offline?)'
 SNAP_RE = re.compile(r'^source\s+(\S+)\s+2>/dev/null\s+\|\|\s+true\s+&&\s+')
 CWD_RE = re.compile(r'pwd -P >\| (/tmp/claude-[A-Za-z0-9_-]+-cwd)')
 URL_RE = re.compile(r'^(https?|file)://')
+SERVER_OWNED = ('', 'plugins', 'shell-snapshots', 'projects', 'session-env', 'todos', 'statsig',
+                'ide', 'cache', 'debug', 'telemetry', 'file-history', 'backups', 'tasks', 'sessions')
 SHIMS = ('rg', 'git', 'xclip', 'wl-paste', 'open')
 # Darwin device scripts (run on the device through one ssh call each)
 DARWIN_TARGETS = '''osascript -e 'clipboard info' 2>/dev/null | grep -qE 'PNGf|TIFF' && { echo image/png; exit 0; }
@@ -96,9 +98,10 @@ def strip_snapshot(cmd):
     tok = m.group(1)
     if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in ('"', "'"):
         tok = tok[1:-1]
-    home = os.environ.get('HOME') or ''
-    if home and (tok == home or tok.startswith(home + '/')):
-        return cmd[m.end():]
+    # the snapshot lives in Claude's config dir: under HOME, or under the config view shown at the computer's path
+    for base in (os.environ.get('HOME') or '', os.environ.get('KOLOOD_CONFIG_VIEW') or ''):
+        if base and (tok == base or tok.startswith(base + '/')):
+            return cmd[m.end():]
     return cmd
 
 
@@ -125,7 +128,11 @@ def run_on_server(cmd):
                 re.escape(view) + r"(?:/[^\s'\";|&<>()`$]*)?").findall(cmd):
             target = os.path.realpath(real + ref[len(view):])
             if target != devcfg and not target.startswith(devcfg + '/'):
-                return True
+                # what Claude itself keeps (plugins, snapshots...) or the server has: server. Anything else
+                # absent here (a skill's own ~/.claude/orch, ...) is the computer's: run it there.
+                first = ref[len(view):].lstrip('/').split('/', 1)[0]
+                if first in SERVER_OWNED or os.path.lexists(target):
+                    return True
     if not dev_root() or not inside_root(os.getcwd()):
         return True
     return False

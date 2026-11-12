@@ -158,6 +158,15 @@ def cmd_list():
                          str(sess.get('clients', 0)), age]))
 
 
+def cmd_history(args):
+    """Recent Claude conversations, newest first: id, age, folder, title (what the phone page lists)."""
+    only = args[0] if args else None  # optional folder filter (substring of its path)
+    for it in Daemon.collect_recent(Daemon.account_list()):
+        if only and only not in (it.get('cwd') or ''):
+            continue
+        print('\t'.join([it['id'], fmt_age(time.time() - it['mtime']), it.get('cwd') or '', it['title']]))
+
+
 def cmd_kill(sid):
     try:
         s = connect_daemon()
@@ -257,9 +266,10 @@ def cmd_attach(argv):
     except (ValueError, OSError):
         pass
     code = 0
+    info = {}
     try:
         while True:
-            res = attach_stream(sock, resize_flag)  # None = closed without an exit frame
+            res = attach_stream(sock, resize_flag, info)  # None = closed without an exit frame
             if res is not None:
                 code = res
                 break
@@ -279,10 +289,12 @@ def cmd_attach(argv):
             sock.close()
         except OSError:
             pass
+    if info.get('resume') and re.fullmatch(r'[0-9a-fA-F-]{8,}', str(info['resume'])):
+        print('\nTo resume this session: kolood --resume %s' % info['resume'])
     sys.exit(code)
 
 
-def attach_stream(sock, resize_flag):
+def attach_stream(sock, resize_flag, info):
     """Stream one connection. Returns the exit code, or None if the socket
     closed without a J exit frame (the daemon is going away)."""
     stdin_fd = sys.stdin.fileno()
@@ -306,6 +318,7 @@ def attach_stream(sock, resize_flag):
                 elif t == b'J':
                     msg = json.loads(p or b'{}')
                     if 'exit' in msg:
+                        info['resume'] = msg.get('resume')
                         return msg['exit'] if isinstance(msg['exit'], int) else 0
             if stdin_open and stdin_fd in rset:
                 d = os.read(stdin_fd, 4096)
@@ -416,9 +429,9 @@ class BaseClient:
     def write_json(self, obj):
         self._write_frame(b'J', json.dumps(obj).encode())
 
-    def send_exit(self, code):
+    def send_exit(self, code, resume=None):
         try:
-            self.write_json({'exit': code})
+            self.write_json({'exit': code, 'resume': resume})
         except Exception:
             pass
         self.close()
@@ -474,7 +487,7 @@ class WsClient(BaseClient):
             return
         self._kick()
 
-    def send_exit(self, code):
+    def send_exit(self, code, resume=None):
         try:
             self.write_json({'t': 'exit', 'code': code})
             self.writer.write(ws_encode(8, struct.pack('!H', 1000)))
@@ -559,6 +572,21 @@ class Session:
         if not data:
             self.mgr.check_finish(self)
             return
+        self.feed(data)
+
+    def drain(self):
+        """Pass on what the process wrote last (e.g. Claude's resume hint) before the pty is closed."""
+        try:
+            os.set_blocking(self.master, False)
+            while True:
+                data = os.read(self.master, 65536)
+                if not data:
+                    break
+                self.feed(data)
+        except OSError:
+            pass
+
+    def feed(self, data):
         cap = self.mgr.buffer_bytes()
         if len(self.buf) + len(data) > cap:
             self.buf += data
@@ -770,6 +798,7 @@ class Manager:
                 except OSError:
                     pass
                 code = await self.loop.run_in_executor(None, sess.proc.wait)
+        sess.drain()
         try:
             os.close(sess.master)
         except OSError:
@@ -777,8 +806,9 @@ class Manager:
         if self.daemon.shutting_down:
             sess.done = True  # keep it for restore; clients keep silent (no exit frame)
             return
+        resume = self.read_sess_meta(sess.id).get('claude_id')
         for c in list(sess.clients):
-            c.send_exit(code)
+            c.send_exit(code, resume)
         sess.clients.clear()
         self.sessions.pop(sess.id, None)
         self.drop_files(sess.id)
@@ -1229,7 +1259,8 @@ class Daemon:
 
     # ---- api
 
-    def account_list(self):
+    @staticmethod
+    def account_list():
         accounts = ['default']
         base = os.path.expanduser('~/.config/kolood/accounts')
         try:
@@ -1246,7 +1277,8 @@ class Daemon:
         return {'running': running, 'recent': self.collect_recent(self.account_list()),
                 'accounts': self.account_list()}
 
-    def collect_recent(self, accounts):
+    @staticmethod
+    def collect_recent(accounts):
         cfgdirs = [('default', os.path.expanduser('~/.claude/projects'))]
         for acct in accounts:
             if acct == 'default':
@@ -1260,7 +1292,7 @@ class Daemon:
                 continue
             seen.add(real)
             for fp in glob.glob(os.path.join(projdir, '*', '*.jsonl')):
-                item = self.parse_jsonl(fp, account)
+                item = Daemon.parse_jsonl(fp, account)
                 if item:
                     out.append(item)
         out.sort(key=lambda x: x['mtime'], reverse=True)
@@ -1294,7 +1326,8 @@ class Daemon:
                         msg = obj.get('message')
                         c = msg.get('content') if isinstance(msg, dict) else None
                         if isinstance(c, str) and c:
-                            first_user = c
+                            if not c.lstrip().startswith('<'):  # slash-command / caveat wrappers are not a title
+                                first_user = c
                         elif isinstance(c, list):
                             for part in c:
                                 if (isinstance(part, dict) and part.get('type') == 'text'
@@ -1542,6 +1575,8 @@ def main():
         cmd_status()
     elif cmd == 'list':
         cmd_list()
+    elif cmd == 'history':
+        cmd_history(args[1:])
     elif cmd == 'kill':
         if len(args) < 2:
             print('usage: kolood_web.py kill ID', file=sys.stderr)
@@ -1550,7 +1585,7 @@ def main():
     elif cmd == 'attach':
         cmd_attach(args[1:])
     else:
-        print('usage: kolood_web.py {serve|passwd|status|list|kill|attach}', file=sys.stderr)
+        print('usage: kolood_web.py {serve|passwd|status|list|history|kill|attach}', file=sys.stderr)
         sys.exit(2)
 
 
