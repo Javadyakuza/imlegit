@@ -107,7 +107,7 @@ server() {
   fi
   # sshd must allow reverse forwards (readable as root only; skipped if we can't read it)
   if /usr/sbin/sshd -T 2>/dev/null | grep -qiE '^allowtcpforwarding (no|local)'; then die "sshd has AllowTcpForwarding disabled; set it to yes in sshd_config"; fi
-  mkdir -p ~/.ssh ~/.claude; chmod 700 ~/.ssh; touch ~/.ssh/authorized_keys ~/.ssh/config ~/.claude/CLAUDE.md; chmod 600 ~/.ssh/authorized_keys
+  mkdir -p ~/.ssh ~/.claude; chmod 700 ~/.ssh; touch ~/.ssh/authorized_keys ~/.ssh/config; chmod 600 ~/.ssh/authorized_keys
   # not connected = a new pairing: forget any previous computer so a fresh token can register a new one
   [ $NEW = 0 ] || { rm -f ~/.ssh/kolood_user ~/.ssh/kolood_login_pub ~/.ssh/kolood_known_hosts; "${GNUSED[@]}" "/# kolood-login/d" ~/.ssh/authorized_keys; }
   [ -f ~/.ssh/kolood_tunnel ] || ssh-keygen -q -t ed25519 -N "" -f ~/.ssh/kolood_tunnel -C kolood-tunnel
@@ -156,6 +156,8 @@ E="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.kolood_env"; if [ -f "$E" ]; then set -a
 # local mode: work in the user's folder itself. Their home is mounted here at the same path (over the tunnel)
 # and every shell command runs on their computer, so it is like running there. Otherwise: ~/workspace on the server.
 D="$HOME/.local/share/kolood/web/kolood_device.py"; S="$HOME/.local/share/kolood/shims"; LOCAL=0
+# drop a dead mount left behind when its process died (a daemon restart stops every process it started)
+fresh() { if awk -v p="$1" '$2 == p && $3 ~ /^fuse/ {f=1} END {exit !f}' /proc/mounts 2>/dev/null && ! timeout 10 ls "$1" >/dev/null 2>&1; then fusermount -uz "$1" 2>/dev/null || fusermount3 -uz "$1" 2>/dev/null || true; fi; }
 if [ $m = 1 ] && [ $sh = 0 ] && [ $srv = 0 ] && [ -n "$cwd" ] && [ -f "$D" ]; then
   why=""
   if ! command -v sshfs >/dev/null; then why="sshfs is not installed on the server (kolood update installs it)"
@@ -165,11 +167,15 @@ if [ $m = 1 ] && [ $sh = 0 ] && [ $srv = 0 ] && [ -n "$cwd" ] && [ -f "$D" ]; th
     case "$DH" in ""|/|"$HOME"|"$HOME"/*) why="your computer's home ($DH) overlaps the server's";; esac
     case "$HOME/" in "$DH"/*) why="your computer's home ($DH) contains the server's";; esac
     case "$cwd" in "$DH"|"$DH"/*) ;; *) [ -n "$why" ] || why="$cwd is outside your home folder";; esac
+    [ -n "$why" ] || fresh "$DH"
     if [ -z "$why" ] && ! mountpoint -q "$DH"; then
       if [ -d "$DH" ] && { [ ! -r "$DH" ] || [ ! -w "$DH" ] || [ -n "$(ls -A "$DH" 2>/dev/null)" ]; }; then why="$DH already exists on the server (not empty or not yours)"
       else
         mkdir -p "$DH" 2>/dev/null || { sudo -n mkdir -p "$DH" && sudo -n chown "$(id -u):$(id -g)" "$DH"; } 2>/dev/null || why="cannot create $DH on the server (needs root or sudo)"
-        [ -n "$why" ] || sshfs "remote:$DH" "$DH" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,idmap=user 2>/dev/null || why="could not mount your files (sshfs/FUSE)"
+        # allow_other only so Claude's settings view can be mounted inside it (fusermount runs as root);
+        # default_permissions + umask=077 keep everyone but you out
+        AO=; grep -qs '^user_allow_other' /etc/fuse.conf && AO=,allow_other,default_permissions,umask=077
+        [ -n "$why" ] || sshfs "remote:$DH" "$DH" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,idmap=user$AO 2>/dev/null || why="could not mount your files (sshfs/FUSE)"
       fi
     fi
   fi
@@ -179,6 +185,21 @@ if [ $LOCAL = 1 ]; then
   export KOLOOD_DEVICE_ROOT="$DH" KOLOOD_DEVICE_OS="$DOS" KOLOOD_SHIM_DIR="$S" CLAUDE_CODE_SHELL_PREFIX="$S/kolood-shell" BROWSER="$S/kolood-open" PATH="$S:$PATH"
   if [ "$DRG" = 1 ]; then export KOLOOD_DEVICE_RG=1 USE_BUILTIN_RIPGREP=0; fi
   if [ "$DGIT" = 1 ]; then export KOLOOD_DEVICE_GIT=1; fi
+  # Claude's own settings at your computer's path too (~/.claude, or ~/.claude-NAME for an account): the server's
+  # config is shown there (bindfs), and your computer's CLAUDE.md, skills, agents, commands and this project's
+  # memory are linked into it (read through a second mount, since the first one covers them)
+  if command -v bindfs >/dev/null; then
+    RC=${CLAUDE_CONFIG_DIR:-$HOME/.claude}; an=${acct:-default}; V="$DH/.claude"; [ "$an" = default ] || V="$DH/.claude-$an"
+    H="$HOME/.local/share/kolood/devcfg/$an"; mkdir -p "$H" "$RC"; fresh "$V"; fresh "$H"
+    if ! mountpoint -q "$V"; then mkdir -p "$V" 2>/dev/null && { bindfs --no-allow-other --resolve-symlinks -o nonempty "$RC" "$V" 2>/dev/null || bindfs --no-allow-other --resolve-symlinks "$RC" "$V" 2>/dev/null; } || true; fi   # nonempty: libfuse2 builds need it, libfuse3 ones refuse it
+    mountpoint -q "$H" || sshfs "remote:$V" "$H" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,idmap=user 2>/dev/null || true
+    [ -f "$RC/CLAUDE.md" ] && [ ! -L "$RC/CLAUDE.md" ] && [ ! -s "$RC/CLAUDE.md" ] && rm -f "$RC/CLAUDE.md"   # an empty one left by older versions
+    if mountpoint -q "$H"; then python3 "$D" link-config "$RC" "$H" "$(printf %s "$cwd" | sed 's/[^a-zA-Z0-9]/-/g')" >/dev/null 2>&1 || true; fi
+    if mountpoint -q "$V"; then
+      [ "$an" = default ] && python3 "$D" sync-global "$HOME/.claude.json" "$RC/.claude.json" 2>/dev/null
+      export CLAUDE_CONFIG_DIR="$V" KOLOOD_CONFIG_VIEW="$V" KOLOOD_CONFIG_REAL="$RC" KOLOOD_DEVICE_CFG="$H"
+    else echo "kolood: Claude's settings stay at a server path (could not show them at $V)"; fi
+  fi
   # the project's own MCP servers start on the user's computer too
   MC="$HOME/.config/kolood/mcp-$(printf %s "$cwd" | sha1sum | cut -c1-12).json"
   if [ -f "$cwd/.mcp.json" ] && [ "$(python3 "$D" mcp-config "$cwd" "$MC" 2>/dev/null)" != 0 ] && [ -f "$MC" ]; then a+=(--strict-mcp-config --mcp-config "$MC"); fi
@@ -235,7 +256,8 @@ START
   [ -n "$SPORT" ] || SPORT=$(ss -ltnp 2>/dev/null | awk '/sshd/{n=split($4,a,":"); print a[n]; exit}')
   SPORT=${SPORT:-22}; MACUSER=$(cat ~/.ssh/kolood_user 2>/dev/null || echo unknown)
 
-  "${GNUSED[@]}" "/$MARK/,/$MARK-end/d" ~/.ssh/config ~/.claude/CLAUDE.md
+  "${GNUSED[@]}" "/$MARK/,/$MARK-end/d" ~/.ssh/config
+  if [ -f ~/.claude/CLAUDE.md ] && [ ! -L ~/.claude/CLAUDE.md ]; then "${GNUSED[@]}" "/$MARK/,/$MARK-end/d" ~/.claude/CLAUDE.md; fi   # never a link to the computer's file
   # our block goes FIRST: ssh uses the first value it finds, so an older `Host remote` of yours can't shadow it
   cp ~/.ssh/config ~/.ssh/kolood_config.old
   cat > ~/.ssh/config <<EOF
@@ -428,6 +450,9 @@ account() {
       [ -n "$n" ] || die "usage: install.sh account remove NAME"
       [ -d "$(acct_dir "$n")" ] || die "no account $n (see: kolood account list)"
       if [ "$(cat ~/.config/kolood/account 2>/dev/null || true)" = "$n" ]; then rm -f ~/.config/kolood/account; fi
+      # its settings view (local mode) goes first: unmount it, and the empty folder it made on the computer
+      awk -v s="$(acct_dir "$n")" '$1 == s && $3 ~ /^fuse/ {print $2}' /proc/mounts 2>/dev/null | while read -r p; do fusermount -uz "$p" 2>/dev/null || fusermount3 -uz "$p" 2>/dev/null; rmdir "$p" 2>/dev/null; done
+      fusermount -uz ~/.local/share/kolood/devcfg/"$n" 2>/dev/null || fusermount3 -uz ~/.local/share/kolood/devcfg/"$n" 2>/dev/null || true
       rm -f "$(acct_dir "$n")/projects"; rm -rf "$(acct_dir "$n")"   # projects is a link to the shared store: keep the sessions
       echo "removed account $n";;
     ""|menu)   # list of accounts (+ add); picking one opens its own options
@@ -486,20 +511,25 @@ local_install() {
   printf '#!/bin/sh\nexec python3 %s xclip "$@"\n' "$D" > "$S/xclip"
   printf '#!/bin/sh\nexec python3 %s wl-paste "$@"\n' "$D" > "$S/wl-paste"
   chmod 755 "$S"/*
-  if ! command -v sshfs >/dev/null; then
-    if sudo_ok && command -v apt-get >/dev/null; then echo "Installing sshfs (lets Claude work in your folders directly)..."; $SUDO apt-get install -y sshfs >/dev/null 2>&1 || true; fi
+  if ! command -v sshfs >/dev/null || ! command -v bindfs >/dev/null; then
+    if sudo_ok && command -v apt-get >/dev/null; then echo "Installing sshfs + bindfs (lets Claude work in your folders directly)..."; $SUDO apt-get install -y sshfs bindfs >/dev/null 2>&1 || true; fi
     command -v sshfs >/dev/null || echo "NOTE: sshfs is not installed: kolood works in ~/workspace on the server instead of in your folders (install: apt install sshfs)"
+    command -v bindfs >/dev/null || echo "NOTE: bindfs is not installed: Claude's own settings show at a server path, and your computer's skills/CLAUDE.md aren't used (install: apt install bindfs)"
   fi
+  # lets the settings view (bindfs) sit inside your mounted home; the home mount itself stays private (umask=077)
+  if [ -f /etc/fuse.conf ] && ! grep -qs '^user_allow_other' /etc/fuse.conf && sudo_ok; then echo user_allow_other | $SUDO tee -a /etc/fuse.conf >/dev/null || true; fi
   [ -e /dev/fuse ] || echo "NOTE: /dev/fuse is missing on this server: kolood can't show your folders here (works in ~/workspace instead)"
 }
 unmount_local() {  # the user's home mounted for local mode
-  awk '$1 ~ /^remote:/ && $3 == "fuse.sshfs" {print $2}' /proc/mounts 2>/dev/null | while read -r p; do fusermount -u "$p" 2>/dev/null || fusermount3 -u "$p" 2>/dev/null || true; done
+  # newest first: the config views sit on top of the home mount
+  tac /proc/mounts 2>/dev/null | awk '($1 ~ /^remote:/ && $3 == "fuse.sshfs") || ($3 ~ /^fuse/ && $1 ~ /(\/\.claude|\/\.config\/kolood\/accounts\/[^\/]+)$/)' | awk '{print $2}' | while read -r p; do fusermount -u "$p" 2>/dev/null || fusermount3 -u "$p" 2>/dev/null || true; done
 }
 # Chrome on the user's computer for Claude (DevTools through the tunnel's port 9222), for every account
 chrome() {
   case "${1:-status}" in on|off|status) ;; *) die "usage: kolood chrome on|off|status";; esac
   if [ "$1" = on ] && ! command -v npx >/dev/null; then die "needs Node.js on the server first: apt install nodejs npm"; fi
-  python3 - "$1" "$HOME/.claude.json" "$ACCTDIR"/*/.claude.json <<'PY2'
+  local G=("$HOME/.claude.json"); [ -f "$HOME/.claude/.claude.json" ] && G+=("$HOME/.claude/.claude.json")   # the copy local mode uses
+  python3 - "$1" "${G[@]}" "$ACCTDIR"/*/.claude.json <<'PY2'
 import json, os, sys
 mode, files = sys.argv[1], [f for f in sys.argv[2:] if "*" not in f]
 entry = {"command": "npx", "args": ["-y", "chrome-devtools-mcp@latest", "--browserUrl", "http://127.0.0.1:9222"]}
@@ -875,7 +905,7 @@ legacy_cleanup() {
   pkill -u "$(id -u)" -f cmb_loop.sh 2>/dev/null || true; pkill -u "$(id -u)" -f "$HOME/.ssh/cmb_tunnel" 2>/dev/null || true
   ssh -O exit mac 2>/dev/null || true; pkill -u "$(id -u)" -f "sleep 2147483647" 2>/dev/null || true
   for f in ~/.zshrc ~/.bash_profile ~/.bashrc ~/.profile ~/.ssh/authorized_keys; do if [ -f "$f" ]; then "${GNUSED[@]}" -e "/$o/d" -e "/# cmb-login/d" "$f"; fi; done
-  for f in ~/.ssh/config ~/.claude/CLAUDE.md; do if [ -f "$f" ]; then "${GNUSED[@]}" "/$o/,/$o-end/d" "$f"; fi; done
+  for f in ~/.ssh/config ~/.claude/CLAUDE.md; do if [ -f "$f" ] && [ ! -L "$f" ]; then "${GNUSED[@]}" "/$o/,/$o-end/d" "$f"; fi; done
   if [ -f ~/.local/bin/imlegit ] && grep -qF "$o" ~/.local/bin/imlegit; then rm -f ~/.local/bin/imlegit; fi
   rm -f ~/.ssh/cmb_*; rm -rf ~/.local/share/imlegit
 }
@@ -896,9 +926,11 @@ remove() {
   fusermount -u ~/remote 2>/dev/null || true; rmdir ~/remote ~/workspace 2>/dev/null || true
   if [ -f ~/.ssh/authorized_keys ]; then "${GNUSED[@]}" -e "/$MARK/d" -e "/# kolood-login/d" ~/.ssh/authorized_keys; fi
   if [ -f ~/.ssh/config ]; then "${GNUSED[@]}" "/$MARK/,/$MARK-end/d" ~/.ssh/config; fi
-  if [ -f ~/.claude/CLAUDE.md ]; then "${GNUSED[@]}" "/$MARK/,/$MARK-end/d" ~/.claude/CLAUDE.md; fi
+  if [ -f ~/.claude/CLAUDE.md ] && [ ! -L ~/.claude/CLAUDE.md ]; then "${GNUSED[@]}" "/$MARK/,/$MARK-end/d" ~/.claude/CLAUDE.md; fi
   pkill -u "$(id -u)" -f "sleep 2147483647" 2>/dev/null || true
-  rm -f ~/.ssh/kolood_*; rm -rf ~/.config/kolood "${I%/*}"
+  rm -f ~/.ssh/kolood_*
+  # never delete through a mount that is still there (it would reach into the computer's files)
+  for x in ~/.config/kolood "${I%/*}"; do if awk -v p="$x/" 'index($2, p) == 1 {f=1} END {exit !f}' /proc/mounts 2>/dev/null; then echo "kept $x: something is still mounted inside it"; else rm -rf "$x"; fi; done
   echo "removed"
 }
 

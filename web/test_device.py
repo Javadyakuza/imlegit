@@ -89,7 +89,8 @@ class DevBase(unittest.TestCase):
                   'KOLOOD_SHIM_DIR', 'KOLOOD_DEVICE_OS', 'KOLOOD_FAKE_LOG',
                   'KOLOOD_CLIP_MODE', 'CLAUDECODE', 'CLAUDE_PROJECT_DIR',
                   'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN',
-                  'ANTHROPIC_API_KEY', 'SHELL'):
+                  'ANTHROPIC_API_KEY', 'SHELL', 'KOLOOD_CONFIG_VIEW',
+                  'KOLOOD_CONFIG_REAL', 'KOLOOD_DEVICE_CFG'):
             e.pop(k, None)
         e.update(self.base_env)
         if env:
@@ -469,6 +470,273 @@ class TestWebResume(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
+
+
+class TestLinkConfig(DevBase):
+    def setUp(self):
+        super().setUp()
+        self.real = os.path.join(self.tmp, 'real')
+        self.dev = os.path.join(self.tmp, 'devcfg')
+        self.slug = 'proj-x'
+        os.makedirs(self.real)
+        os.makedirs(self.dev)
+
+    def mk(self, path, content='x\n', isdir=False):
+        if isdir:
+            os.makedirs(path)
+            return path
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            f.write(content)
+        return path
+
+    def run_link(self, slug=None):
+        return self.run_dev(['link-config', self.real, self.dev,
+                             self.slug if slug is None else slug])
+
+    def test_creates_links(self):
+        self.mk(os.path.join(self.dev, 'CLAUDE.md'), 'device md\n')
+        self.mk(os.path.join(self.dev, 'skills', 'devskill', 'SKILL.md'), isdir=True)
+        self.mk(os.path.join(self.dev, 'agents', 'a1.md'))
+        self.mk(os.path.join(self.dev, 'commands', 'c1.md'))
+        self.mk(os.path.join(self.dev, 'skills', '.hidden'))
+        self.mk(os.path.join(self.dev, 'projects', self.slug, 'memory', 'm.json'),
+                isdir=True)
+        r = self.run_link()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, b'5\n')  # md + skill + agent + command + memory
+        self.assertEqual(os.readlink(os.path.join(self.real, 'CLAUDE.md')),
+                         os.path.join(self.dev, 'CLAUDE.md'))
+        for d, n in (('skills', 'devskill'), ('agents', 'a1.md'), ('commands', 'c1.md')):
+            p = os.path.join(self.real, d, n)
+            self.assertTrue(os.path.islink(p), p)
+            self.assertEqual(os.readlink(p), os.path.join(self.dev, d, n))
+        mem = os.path.join(self.real, 'projects', self.slug, 'memory')
+        self.assertTrue(os.path.islink(mem))
+        self.assertEqual(os.readlink(mem),
+                         os.path.join(self.dev, 'projects', self.slug, 'memory'))
+        self.assertFalse(os.path.lexists(os.path.join(self.real, 'skills', '.hidden')))
+
+    def test_leaves_server_own_entries(self):
+        self.mk(os.path.join(self.real, 'CLAUDE.md'), 'server md\n')
+        self.mk(os.path.join(self.real, 'skills', 'devskill'), '#!/bin/sh\nown\n')
+        self.mk(os.path.join(self.dev, 'CLAUDE.md'))
+        self.mk(os.path.join(self.dev, 'skills', 'devskill', 'SKILL.md'), isdir=True)
+        self.mk(os.path.join(self.dev, 'skills', 'other', 'S.md'), isdir=True)
+        r = self.run_link()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, b'1\n')
+        with open(os.path.join(self.real, 'CLAUDE.md')) as f:
+            self.assertEqual(f.read(), 'server md\n')
+        self.assertFalse(os.path.islink(os.path.join(self.real, 'CLAUDE.md')))
+        p = os.path.join(self.real, 'skills', 'devskill')
+        self.assertFalse(os.path.islink(p))
+        with open(p) as f:
+            self.assertEqual(f.read(), '#!/bin/sh\nown\n')
+        other = os.path.join(self.real, 'skills', 'other')
+        self.assertTrue(os.path.islink(other))
+        self.assertEqual(os.readlink(other), os.path.join(self.dev, 'skills', 'other'))
+
+    def test_symlinked_dir_skipped(self):
+        other = os.path.join(self.tmp, 'otherskills')
+        os.makedirs(os.path.join(other, 's1'))
+        os.symlink(other, os.path.join(self.real, 'skills'))
+        self.mk(os.path.join(self.dev, 'skills', 'devskill', 'SKILL.md'), isdir=True)
+        r = self.run_link()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, b'0\n')
+        self.assertTrue(os.path.islink(os.path.join(self.real, 'skills')))
+        self.assertFalse(os.path.lexists(os.path.join(other, 'devskill')))
+
+    def test_empty_memory_replaced_nonempty_kept(self):
+        dmem = os.path.join(self.dev, 'projects', self.slug, 'memory')
+        self.mk(dmem, isdir=True)
+        mem = os.path.join(self.real, 'projects', self.slug, 'memory')
+        self.mk(mem, isdir=True)  # empty server dir -> replaced by the link
+        r = self.run_link()
+        self.assertEqual(r.stdout, b'1\n')
+        self.assertTrue(os.path.islink(mem))
+        os.remove(mem)
+        os.makedirs(mem)
+        self.mk(os.path.join(mem, 'note.md'))  # non-empty -> kept as a real dir
+        r = self.run_link()
+        self.assertEqual(r.stdout, b'0\n')
+        self.assertFalse(os.path.islink(mem))
+        self.assertTrue(os.path.isfile(os.path.join(mem, 'note.md')))
+
+    def test_removes_dangling_links(self):
+        skill = self.mk(os.path.join(self.dev, 'skills', 'devskill', 'SKILL.md'),
+                        isdir=True)
+        self.mk(os.path.join(self.dev, 'CLAUDE.md'))
+        self.mk(os.path.join(self.dev, 'projects', self.slug, 'memory'), isdir=True)
+        r = self.run_link()
+        self.assertEqual(r.stdout, b'3\n')
+        shutil.rmtree(os.path.join(self.dev, 'skills', 'devskill'))
+        os.remove(os.path.join(self.dev, 'CLAUDE.md'))
+        shutil.rmtree(os.path.join(self.dev, 'projects', self.slug))
+        r = self.run_link()
+        self.assertEqual(r.stdout, b'0\n')
+        self.assertFalse(os.path.lexists(os.path.join(self.real, 'CLAUDE.md')))
+        self.assertFalse(os.path.lexists(os.path.join(self.real, 'skills', 'devskill')))
+        self.assertFalse(os.path.lexists(
+            os.path.join(self.real, 'projects', self.slug, 'memory')))
+
+    def test_unreachable_devcfg_changes_nothing(self):
+        self.mk(os.path.join(self.real, 'CLAUDE.md'), 'keep\n')
+        dangling = os.path.join(self.real, 'skills', 'old')
+        os.makedirs(os.path.join(self.real, 'skills'))
+        os.symlink(os.path.join(self.dev, 'skills', 'gone'), dangling)
+        r = self.run_dev(['link-config', self.real,
+                          os.path.join(self.tmp, 'nope'), self.slug])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, b'0\n')
+        self.assertTrue(os.path.islink(dangling))  # not cleaned: device unreachable
+        with open(os.path.join(self.real, 'CLAUDE.md')) as f:
+            self.assertEqual(f.read(), 'keep\n')
+
+    def test_bad_slug(self):
+        for slug in ('bad/slug', 'bad_slug', 'bad slug', ''):
+            r = self.run_link(slug=slug)
+            self.assertEqual(r.returncode, 2, slug)
+        self.assertEqual(sorted(os.listdir(self.real)), [])
+
+    def test_idempotent(self):
+        self.mk(os.path.join(self.dev, 'CLAUDE.md'))
+        self.mk(os.path.join(self.dev, 'skills', 'devskill', 'SKILL.md'), isdir=True)
+        r1 = self.run_link()
+        self.assertEqual(r1.stdout, b'2\n')
+        r2 = self.run_link()
+        self.assertEqual(r2.stdout, b'2\n')
+        self.assertTrue(os.path.islink(os.path.join(self.real, 'CLAUDE.md')))
+        self.assertTrue(os.path.islink(os.path.join(self.real, 'skills', 'devskill')))
+
+
+class TestSyncGlobal(DevBase):
+    def setUp(self):
+        super().setUp()
+        self.src = os.path.join(self.tmp, 'src.json')
+        self.dst = os.path.join(self.tmp, 'dst.json')
+
+    def wr(self, path, obj):
+        with open(path, 'w') as f:
+            json.dump(obj, f)
+
+    def rd(self, path):
+        with open(path) as f:
+            return json.load(f)
+
+    def test_copy_when_missing(self):
+        self.wr(self.src, {'oauthAccount': {'a': 1}, 'x': 2})
+        r = self.run_dev(['sync-global', self.src, self.dst])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.rd(self.dst), {'oauthAccount': {'a': 1}, 'x': 2})
+        self.assertEqual(stat.S_IMODE(os.stat(self.dst).st_mode), 0o600)
+
+    def test_merges_keys_when_src_newer(self):
+        self.wr(self.src, {'oauthAccount': {'new': 1}, 'primaryApiKey': 'k',
+                           'customApiKeyResponses': {'x': 'y'}, 'other': 's'})
+        self.wr(self.dst, {'oauthAccount': {'old': 1}, 'keep': 'd'})
+        os.utime(self.dst, (time.time() - 100, time.time() - 100))  # src is newer
+        r = self.run_dev(['sync-global', self.src, self.dst])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        d = self.rd(self.dst)
+        self.assertEqual(d['oauthAccount'], {'new': 1})
+        self.assertEqual(d['primaryApiKey'], 'k')
+        self.assertEqual(d['customApiKeyResponses'], {'x': 'y'})
+        self.assertEqual(d['keep'], 'd')
+        self.assertNotIn('other', d)
+
+    def test_dst_newer_untouched(self):
+        self.wr(self.src, {'oauthAccount': {'new': 1}})
+        self.wr(self.dst, {'oauthAccount': {'old': 1}, 'keep': 'd'})
+        future = time.time() + 100
+        os.utime(self.dst, (future, future))
+        r = self.run_dev(['sync-global', self.src, self.dst])
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(self.rd(self.dst),
+                         {'oauthAccount': {'old': 1}, 'keep': 'd'})
+
+    def test_invalid_dst_left_alone(self):
+        self.wr(self.src, {'primaryApiKey': 'k'})
+        with open(self.dst, 'w') as f:
+            f.write('{not json')
+        old = time.time() - 100
+        os.utime(self.src, (old, old))
+        r = self.run_dev(['sync-global', self.src, self.dst])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(self.dst) as f:
+            self.assertEqual(f.read(), '{not json')
+
+    def test_bad_src_is_noop(self):
+        self.wr(self.src, [1, 2])  # valid JSON, not an object
+        r = self.run_dev(['sync-global', self.src, self.dst])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.exists(self.dst))
+        r = self.run_dev(['sync-global', os.path.join(self.tmp, 'nope'), self.dst])
+        self.assertEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(self.dst))
+
+
+class TestConfigRouting(DevBase):
+    def setUp(self):
+        super().setUp()
+        self.real = os.path.join(self.tmp, 'real')
+        self.dev = os.path.join(self.tmp, 'devcfg')
+        self.view = os.path.join(self.root, '.claude')
+        os.makedirs(self.real)
+        os.makedirs(self.dev)
+        # REAL/skills/devskill is a link into DEVCFG, as link-config makes it
+        os.makedirs(os.path.join(self.dev, 'skills', 'devskill'))
+        os.makedirs(os.path.join(self.real, 'skills'))
+        os.symlink(os.path.join(self.dev, 'skills', 'devskill'),
+                   os.path.join(self.real, 'skills', 'devskill'))
+        self.cfg_env = {'KOLOOD_CONFIG_VIEW': self.view,
+                        'KOLOOD_CONFIG_REAL': self.real,
+                        'KOLOOD_DEVICE_CFG': self.dev}
+
+    def test_under_devcfg_routes_to_device(self):
+        cmd = 'cat %s/skills/devskill/x.sh; echo DEV-OK' % self.view
+        r = self.run_dev(['shell', cmd], cwd=self.root, env=self.cfg_env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(b'DEV-OK', r.stdout)
+        self.assertEqual(len(self.log_lines()), 1)
+
+    def test_outside_devcfg_routes_to_server(self):
+        cmd = 'cat %s/plugins/p/hook.sh 2>/dev/null; echo SRV-OK' % self.view
+        r = self.run_dev(['shell', cmd], cwd=self.root, env=self.cfg_env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(b'SRV-OK', r.stdout)
+        self.assertEqual(self.log_lines(), [])
+
+    def test_mixed_routes_to_server(self):
+        cmd = 'cat %s/skills/devskill/x.sh %s/plugins/x; echo SRV-OK' % (
+            self.view, self.view)
+        r = self.run_dev(['shell', cmd], cwd=self.root, env=self.cfg_env)
+        self.assertIn(b'SRV-OK', r.stdout)
+        self.assertEqual(self.log_lines(), [])
+
+    def test_no_view_reference_unchanged(self):
+        before = len(self.log_lines())
+        r = self.run_dev(['shell', 'echo DEV-OK2'], cwd=self.root, env=self.cfg_env)
+        self.assertIn(b'DEV-OK2', r.stdout)
+        self.assertEqual(len(self.log_lines()), before + 1)  # device, as before
+        p = os.path.join(self.root, 'file.txt')  # device path that is not VIEW
+        r = self.run_dev(['shell', 'cat %s; echo DEV-OK3' % p], cwd=self.root,
+                         env=self.cfg_env)
+        self.assertIn(b'DEV-OK3', r.stdout)
+        self.assertEqual(len(self.log_lines()), before + 2)
+
+    def test_view_without_real_or_devcfg_is_server(self):
+        cmd = 'cat %s/skills/devskill/x.sh; echo SRV-OK' % self.view
+        env = dict(self.cfg_env)
+        env['KOLOOD_CONFIG_REAL'] = ''
+        r = self.run_dev(['shell', cmd], cwd=self.root, env=env)
+        self.assertIn(b'SRV-OK', r.stdout)
+        self.assertEqual(self.log_lines(), [])
+        env = {'KOLOOD_CONFIG_VIEW': self.view, 'KOLOOD_DEVICE_CFG': self.dev}
+        r = self.run_dev(['shell', cmd], cwd=self.root, env=env)
+        self.assertIn(b'SRV-OK', r.stdout)
+        self.assertEqual(self.log_lines(), [])
 
 
 if __name__ == '__main__':

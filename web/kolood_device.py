@@ -111,6 +111,21 @@ def run_on_server(cmd):
     if cmd.startswith('xclip ') or cmd.startswith('wl-paste ') \
             or cmd in ('xclip', 'wl-paste') or 'xclip -selection clipboard' in cmd:
         return True
+    view = os.environ.get('KOLOOD_CONFIG_VIEW') or ''
+    if view and (view + '/' in cmd or re.search(
+            r'(?:^|[\s\'"=])' + re.escape(view) + r'(?:$|[\s\'";|&<>()`$])', cmd)):
+        # paths under the visible config dir run on the server only when they
+        # do not resolve into the device's own config mount
+        real = os.environ.get('KOLOOD_CONFIG_REAL') or ''
+        devcfg = os.environ.get('KOLOOD_DEVICE_CFG') or ''
+        if not real or not devcfg:
+            return True
+        devcfg = os.path.realpath(devcfg)
+        for ref in re.compile(
+                re.escape(view) + r"(?:/[^\s'\";|&<>()`$]*)?").findall(cmd):
+            target = os.path.realpath(real + ref[len(view):])
+            if target != devcfg and not target.startswith(devcfg + '/'):
+                return True
     if not dev_root() or not inside_root(os.getcwd()):
         return True
     return False
@@ -336,6 +351,155 @@ def cmd_mcp_config(args):
     print(len(servers))
 
 
+# ------------------------------------------------------------- config view
+
+SYNC_KEYS = ('oauthAccount', 'primaryApiKey', 'customApiKeyResponses')
+
+
+def link_target_under(path, base):
+    """The symlink target if path is a symlink pointing under base, else None."""
+    try:
+        tgt = os.readlink(path)
+    except OSError:
+        return None
+    if tgt == base or tgt.startswith(base + '/'):
+        return tgt
+    return None
+
+
+def cmd_link_config(args):
+    if len(args) != 3:
+        print('usage: kolood_device.py link-config REAL DEVCFG SLUG', file=sys.stderr)
+        sys.exit(2)
+    real = os.path.abspath(args[0])
+    devcfg = os.path.abspath(args[1])
+    slug = args[2]
+    if not re.match(r'^[A-Za-z0-9-]+$', slug):
+        sys.exit(2)
+    try:
+        os.listdir(devcfg)
+    except OSError:
+        print(0)  # device config dir unreachable: change nothing, clean up nothing
+        return
+
+    def safe(fn):
+        try:
+            fn()
+        except OSError:
+            pass
+
+    dm = os.path.join(devcfg, 'CLAUDE.md')
+    rm = os.path.join(real, 'CLAUDE.md')
+    if not os.path.lexists(rm) and os.path.isfile(dm):
+        safe(lambda: os.symlink(dm, rm))
+    for d in ('skills', 'agents', 'commands'):
+        dd = os.path.join(devcfg, d)
+        try:
+            entries = os.listdir(dd)
+        except OSError:
+            continue
+        rd = os.path.join(real, d)
+        if os.path.islink(rd):
+            continue  # the server has its own dir here: leave it alone
+        try:
+            if not os.path.lexists(rd):
+                os.makedirs(rd)
+        except OSError:
+            continue
+        for name in entries:
+            if name.startswith('.'):
+                continue
+            dst = os.path.join(rd, name)
+            if os.path.lexists(dst):
+                continue
+            safe(lambda dst=dst, src=os.path.join(dd, name): os.symlink(src, dst))
+    m = os.path.join(real, 'projects', slug, 'memory')
+    dm = os.path.join(devcfg, 'projects', slug, 'memory')
+    if os.path.isdir(dm):
+        if os.path.isdir(m) and not os.path.islink(m):
+            def rmdir_if_empty():
+                if not os.listdir(m):
+                    os.rmdir(m)
+            safe(rmdir_if_empty)
+        if not os.path.lexists(m):
+            def link_memory():
+                os.makedirs(os.path.dirname(m), exist_ok=True)
+                os.symlink(dm, m)
+            safe(link_memory)
+    # drop our links whose device target is gone, then count what is left
+    ours = [rm]
+    for d in ('skills', 'agents', 'commands'):
+        rd = os.path.join(real, d)
+        if os.path.islink(rd):
+            continue
+        try:
+            ours += [os.path.join(rd, n) for n in os.listdir(rd)]
+        except OSError:
+            pass
+    ours.append(m)
+    count = 0
+    for p in ours:
+        tgt = link_target_under(p, devcfg)
+        if tgt is None:
+            continue
+        if os.path.exists(tgt):
+            count += 1
+        else:
+            safe(lambda p=p: os.remove(p))
+    print(count)
+
+
+def write_private(path, data):
+    tmp = os.path.join(os.path.dirname(path) or '.', '.kolood-tmp-%d' % os.getpid())
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def cmd_sync_global(args):
+    if len(args) != 2:
+        print('usage: kolood_device.py sync-global SRC DST', file=sys.stderr)
+        sys.exit(2)
+    src, dst = args
+    try:
+        with open(src, 'rb') as f:
+            sdata = json.loads(f.read().decode('utf-8'))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return
+    if not isinstance(sdata, dict):
+        return
+    if not os.path.lexists(dst):
+        try:
+            with open(src, 'rb') as f:
+                write_private(dst, f.read())
+        except OSError:
+            pass
+        return
+    try:
+        if os.stat(src).st_mtime <= os.stat(dst).st_mtime:
+            return
+        with open(dst, 'rb') as f:
+            ddata = json.load(f)
+    except (OSError, ValueError, UnicodeDecodeError):
+        return
+    if not isinstance(ddata, dict):
+        return
+    for k in SYNC_KEYS:
+        if k in sdata:
+            ddata[k] = sdata[k]
+    write_private(dst, json.dumps(ddata).encode('utf-8'))
+
+
 # --------------------------------------------------------------------- main
 
 def dispatch(sub, args):
@@ -353,9 +517,13 @@ def dispatch(sub, args):
         cmd_info()
     elif sub == 'mcp-config':
         cmd_mcp_config(args)
+    elif sub == 'link-config':
+        cmd_link_config(args)
+    elif sub == 'sync-global':
+        cmd_sync_global(args)
     else:
-        print('usage: kolood_device.py {shell|rg|git|xclip|wl-paste|open|info|mcp-config}',
-              file=sys.stderr)
+        print('usage: kolood_device.py {shell|rg|git|xclip|wl-paste|open|info|'
+              'mcp-config|link-config|sync-global}', file=sys.stderr)
         sys.exit(2)
 
 

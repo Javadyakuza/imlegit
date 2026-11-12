@@ -66,8 +66,9 @@ When you start `kolood` in a folder of your home directory, Claude works **in th
 - **Clipboard and links**: pasting a screenshot reads your computer's clipboard; links open in your computer's browser.
 - **Sessions** are stored under your folder's path, so `kolood -c` / `--resume` and your project's `CLAUDE.md` work as they would locally.
 - Claude is told only: your working folder, on the user's computer.
+- **Claude's own settings at your computer's path**: Claude's config folder shows at `~/.claude` (account `NAME`: `~/.claude-NAME`) of your computer's path, so memory, skill and settings paths look like your computer's. It holds the server's login and settings (bindfs); your computer's `CLAUDE.md`, skills, agents, commands and this project's memory are linked in, read and written in place on your computer (never copied). The server's own items of the same name win. A script in one of your skills runs on your computer; one in the server's own skills or plugins runs on the server.
 
-Falls back to `~/workspace` on the server (with a one-line reason) when the folder is outside your home, your computer is unreachable, or the server can't mount (needs `sshfs` + FUSE, and root/sudo to create the same path; installed by the server step). `kolood --server` forces it. Claude Code's own environment line still says Linux; everything it touches is your computer. If your computer sleeps mid-session, file and command tools wait or fail until it's back.
+Falls back to `~/workspace` on the server (with a one-line reason) when the folder is outside your home, your computer is unreachable, or the server can't mount (needs `sshfs` + FUSE, and root/sudo to create the same path; `bindfs` for the settings view; installed by the server step). `kolood --server` forces it. Claude Code's own environment line still says Linux; everything it touches is your computer. If your computer sleeps mid-session, file and command tools wait or fail until it's back.
 
 ## Accounts
 
