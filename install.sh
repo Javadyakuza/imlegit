@@ -802,6 +802,7 @@ EOF
 I="$HOME/.local/share/kolood/install.sh"
 case "${1:-}" in
   ""|setup|--setup|menu) exec bash "$I" menu;;
+  update) exec bash "$I" update;;
   -h|--help|help) cat <<'HELP'
 kolood                        interactive menu (sessions, accounts, pairing, update, uninstall)
 One-liners (no questions asked):
@@ -810,6 +811,7 @@ One-liners (no questions asked):
   kolood --resume [ID]        resume: pick from a list, or that session ID (copied from here if local)
   kolood shell                a login shell on the server
   kolood chrome on|off        let Claude drive Chrome on this computer (needs Node.js on the server)
+  kolood update               update kolood here and on the server (then: kolood web restart)
   kolood sessions             running sessions on the server (also visible on the phone page)
   kolood history [FOLDER]     recent conversations (id, age, folder, title); resume one: kolood --resume ID
   kolood attach [ID]          join a running session (pick from a list without ID)
