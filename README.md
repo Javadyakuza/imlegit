@@ -31,6 +31,7 @@ Two ways, same features:
 | `kolood -c` | Continue the latest session of the current folder. Your computer's sessions for this folder are copied to the server first |
 | `kolood --resume [ID]` | Resume: pick from the list, or that session ID (copied from your computer if it's a local one) |
 | `kolood shell` | A login shell on the server (`ssh remote` works there too) |
+| `kolood chrome on \| off` | Let Claude drive Chrome on your computer (needs Node.js on the server; start Chrome with `--remote-debugging-port=9222 --user-data-dir=<separate profile>`) |
 | `kolood sessions` | Sessions running on the server (the same list the phone page shows) |
 | `kolood attach [ID]` | Join a running session (started here, on the phone, or anywhere); without ID you pick from a list |
 | `kolood web [status \| password [PW] \| domain NAME \| domain off \| restart]` | The phone page: its address, password, domain |
@@ -44,6 +45,7 @@ Flags (add to `start`, `-c` or `--resume`):
 |---|---|
 | `--account NAME` | Use that Claude account on the server for this session |
 | `--no-remote` | This session isn't told about your computer (and nothing is copied) |
+| `--server` | Work in `~/workspace` on the server instead of in your folder (see Local mode) |
 | any Claude flag | Passed to `claude`; a command that starts with a flag starts Claude directly (`kolood --model opus`) |
 
 A bare word that isn't a command is rejected (`kolood fix` → use `kolood start "fix"`), so a typo never sends a prompt by accident.
@@ -54,6 +56,18 @@ A bare word that isn't a command is rejected (`kolood fix` → use `kolood start
 - Each `kolood` is its own session, all sharing one tunnel. Your computer stays awake while a session is open (`caffeinate` on macOS, `systemd-inhibit` on Linux).
 - Sessions live on the server: if the terminal closes or the network drops, the session keeps running. Rejoin with `kolood attach`, or open it on your phone.
 - Copied sessions keep the newer version: one you continued on the server isn't overwritten by an older local copy.
+
+## Local mode: Claude works in your folder, as if it ran on your computer
+
+When you start `kolood` in a folder of your home directory, Claude works **in that folder**, and nothing about Claude is installed on your computer:
+- **Files**: your home is shown on the server at the same path (`/Users/you/...`) through the tunnel (sshfs). Claude reads, edits and searches your real files with its normal tools; they never leave your computer.
+- **Commands**: every command Claude runs (`git`, `npm test`, `docker`, `ls`...) runs on your computer, in that folder, with your PATH and tools. So do your project's hooks and its MCP servers (`.mcp.json`).
+- **Speed**: searches (`rg`) and `git` run on your computer and send back only the results.
+- **Clipboard and links**: pasting a screenshot reads your computer's clipboard; links open in your computer's browser.
+- **Sessions** are stored under your folder's path, so `kolood -c` / `--resume` and your project's `CLAUDE.md` work as they would locally.
+- Claude is told only: your working folder, on the user's computer.
+
+Falls back to `~/workspace` on the server (with a one-line reason) when the folder is outside your home, your computer is unreachable, or the server can't mount (needs `sshfs` + FUSE, and root/sudo to create the same path; installed by the server step). `kolood --server` forces it. Claude Code's own environment line still says Linux; everything it touches is your computer. If your computer sleeps mid-session, file and command tools wait or fail until it's back.
 
 ## Accounts
 

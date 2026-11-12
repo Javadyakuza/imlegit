@@ -139,9 +139,9 @@ I="$HOME/.local/share/kolood/install.sh"; W="$HOME/.local/share/kolood/web/koloo
 # run inside the session holder, so the session survives a closed terminal and the phone page can join it
 if [ -z "${KOLOOD_INSIDE:-}" ] && [ -t 0 ] && [ -f "$W" ] && python3 "$W" status >/dev/null 2>&1; then exec python3 "$W" attach -- "$0" "$@"; fi
 cwd=$(printf %s "${1:-}" | base64 -d 2>/dev/null || true); shift
-m=1; sh=0; acct=; a=()
+m=1; sh=0; srv=0; acct=; a=()
 while [ $# -gt 0 ]; do case "$1" in
-  --no-remote|--no-mac) m=0;; --mac|--remote) ;; --shell) sh=1;;
+  --no-remote|--no-mac) m=0;; --mac|--remote) ;; --shell) sh=1;; --server) srv=1;;
   --account|--acc) acct=$2; shift;; --account=*|--acc=*) acct=${1#*=};;
   *) a+=("$1");;
 esac; shift; done
@@ -153,7 +153,38 @@ if [ -n "$acct" ] && [ "$acct" != default ]; then
 fi
 # a token saved with `kolood account token` replaces the browser login for this account
 E="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.kolood_env"; if [ -f "$E" ]; then set -a; . "$E"; set +a; fi
-mkdir -p "$HOME/workspace"; cd "$HOME/workspace"
+# local mode: work in the user's folder itself. Their home is mounted here at the same path (over the tunnel)
+# and every shell command runs on their computer, so it is like running there. Otherwise: ~/workspace on the server.
+D="$HOME/.local/share/kolood/web/kolood_device.py"; S="$HOME/.local/share/kolood/shims"; LOCAL=0
+if [ $m = 1 ] && [ $sh = 0 ] && [ $srv = 0 ] && [ -n "$cwd" ] && [ -f "$D" ]; then
+  why=""
+  if ! command -v sshfs >/dev/null; then why="sshfs is not installed on the server (kolood update installs it)"
+  elif ! INFO=$(python3 "$D" info 2>/dev/null); then why="your computer is not reachable"
+  else
+    eval "$(printf %s "$INFO" | python3 -c 'import json,sys,shlex;d=json.load(sys.stdin);print("DH=%s DOS=%s DRG=%d DGIT=%d"%(shlex.quote(d["home"]),shlex.quote(d["os"]),bool(d["rg"]),bool(d["git"])))')"
+    case "$DH" in ""|/|"$HOME"|"$HOME"/*) why="your computer's home ($DH) overlaps the server's";; esac
+    case "$HOME/" in "$DH"/*) why="your computer's home ($DH) contains the server's";; esac
+    case "$cwd" in "$DH"|"$DH"/*) ;; *) [ -n "$why" ] || why="$cwd is outside your home folder";; esac
+    if [ -z "$why" ] && ! mountpoint -q "$DH"; then
+      if [ -d "$DH" ] && { [ ! -r "$DH" ] || [ ! -w "$DH" ] || [ -n "$(ls -A "$DH" 2>/dev/null)" ]; }; then why="$DH already exists on the server (not empty or not yours)"
+      else
+        mkdir -p "$DH" 2>/dev/null || { sudo -n mkdir -p "$DH" && sudo -n chown "$(id -u):$(id -g)" "$DH"; } 2>/dev/null || why="cannot create $DH on the server (needs root or sudo)"
+        [ -n "$why" ] || sshfs "remote:$DH" "$DH" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,idmap=user 2>/dev/null || why="could not mount your files (sshfs/FUSE)"
+      fi
+    fi
+  fi
+  if [ -z "$why" ] && cd "$cwd" 2>/dev/null; then LOCAL=1; else echo "kolood: working on the server in ~/workspace (${why:-cannot open $cwd})"; fi
+fi
+if [ $LOCAL = 1 ]; then
+  export KOLOOD_DEVICE_ROOT="$DH" KOLOOD_DEVICE_OS="$DOS" KOLOOD_SHIM_DIR="$S" CLAUDE_CODE_SHELL_PREFIX="$S/kolood-shell" BROWSER="$S/kolood-open" PATH="$S:$PATH"
+  if [ "$DRG" = 1 ]; then export KOLOOD_DEVICE_RG=1 USE_BUILTIN_RIPGREP=0; fi
+  if [ "$DGIT" = 1 ]; then export KOLOOD_DEVICE_GIT=1; fi
+  # the project's own MCP servers start on the user's computer too
+  MC="$HOME/.config/kolood/mcp-$(printf %s "$cwd" | sha1sum | cut -c1-12).json"
+  if [ -f "$cwd/.mcp.json" ] && [ "$(python3 "$D" mcp-config "$cwd" "$MC" 2>/dev/null)" != 0 ] && [ -f "$MC" ]; then a+=(--strict-mcp-config --mcp-config "$MC"); fi
+else
+  mkdir -p "$HOME/workspace"; cd "$HOME/workspace"
+fi
 [ $sh = 1 ] && exec "${SHELL:-/bin/bash}" -l
 command -v claude >/dev/null || { echo "Claude Code is not installed on this server. Install it: curl -fsSL https://claude.ai/install.sh | bash"; exit 1; }
 # resuming: copy the matching sessions from the user's computer first, so --resume ID, the picker and --continue see them
@@ -161,9 +192,9 @@ if [ $m = 1 ] && [ -f "$I" ]; then
   n=${#a[@]}
   for ((i=0; i<n; i++)); do case "${a[i]}" in
     -r|--resume) nx="${a[i+1]:-}"
-      if [[ "$nx" =~ ^[0-9a-fA-F-]{8,}$ ]]; then bash "$I" pull id "$nx"; elif [ -n "$cwd" ]; then bash "$I" pull dir "$cwd"; fi;;
-    --resume=*) bash "$I" pull id "${a[i]#--resume=}";;
-    -c|--continue) [ -n "$cwd" ] && bash "$I" pull dir "$cwd";;
+      if [[ "$nx" =~ ^[0-9a-fA-F-]{8,}$ ]]; then bash "$I" pull id "$nx" "$PWD"; elif [ -n "$cwd" ]; then bash "$I" pull dir "$cwd" "$PWD"; fi;;
+    --resume=*) bash "$I" pull id "${a[i]#--resume=}" "$PWD";;
+    -c|--continue) [ -n "$cwd" ] && bash "$I" pull dir "$cwd" "$PWD";;
   esac; done
 fi
 # inside the session holder: tell it which conversation this is, so it can resume it after a server restart
@@ -187,6 +218,7 @@ if [ -n "${KOLOOD_SESSION_FILE:-}" ]; then
     printf '{"claude_id":"%s","account":"%s","no_remote":%s}\n' "$sid" "${acct:-default}" "$nr" > "$KOLOOD_SESSION_FILE"; fi
 fi
 [ $m = 1 ] || exec claude "${a[@]}"
+[ $LOCAL = 1 ] && exec claude --append-system-prompt "Your working folder is $cwd on the user's computer ($DOS). The files you read and edit and every shell command you run are on that computer." "${a[@]}"
 exec claude --append-system-prompt "You are on a server. The user is working on a remote machine, reached with: ssh remote '<cmd>' (it may be offline). Their working folder there is $cwd. Each call is a fresh shell, so use absolute paths or 'cd dir && cmd'. Their files and paths, including those in a resumed conversation, are on the remote." "${a[@]}"
 START
   chmod 700 ~/.ssh/kolood_start
@@ -225,6 +257,7 @@ EOF
   cat ~/.ssh/kolood_config.old >> ~/.ssh/config; rm -f ~/.ssh/kolood_config.old; chmod 600 ~/.ssh/config
   # Nothing is written to ~/.claude/CLAUDE.md: each `kolood` session is told about the computer via its system prompt (`--no-remote` skips it).
   for n in $(ls "$ACCTDIR" 2>/dev/null); do acct_share "$n"; done
+  local_install
   web_install "$HOST" || echo "WARNING: phone web terminal not set up (see above); retry: kolood web install"
   if [ $PAIRED = 1 ]; then echo "Paired and connected; refreshed. On your computer type: kolood"; return 0; fi
   if [ $KEEP = 1 ]; then echo "Refreshed. Your computer is not connected right now (asleep/offline?)."; return 0; fi
@@ -442,6 +475,48 @@ account() {
   esac
 }
 
+# ---------------------------------------------------------------- local mode (server): stand-ins + sshfs
+local_install() {
+  local S=$HOME/.local/share/kolood/shims D='"$HOME/.local/share/kolood/web/kolood_device.py"'
+  mkdir -p "$S"
+  printf '#!/bin/sh\nexec python3 %s shell "$@"\n' "$D" > "$S/kolood-shell"
+  printf '#!/bin/sh\nexec python3 %s open "$@"\n' "$D" > "$S/kolood-open"
+  printf '#!/bin/sh\n[ "${KOLOOD_DEVICE_RG:-}" = 1 ] || KOLOOD_DEVICE_ROOT=\nexport KOLOOD_DEVICE_ROOT\nexec python3 %s rg "$@"\n' "$D" > "$S/rg"
+  printf '#!/bin/sh\n[ "${KOLOOD_DEVICE_GIT:-}" = 1 ] || KOLOOD_DEVICE_ROOT=\nexport KOLOOD_DEVICE_ROOT\nexec python3 %s git "$@"\n' "$D" > "$S/git"
+  printf '#!/bin/sh\nexec python3 %s xclip "$@"\n' "$D" > "$S/xclip"
+  printf '#!/bin/sh\nexec python3 %s wl-paste "$@"\n' "$D" > "$S/wl-paste"
+  chmod 755 "$S"/*
+  if ! command -v sshfs >/dev/null; then
+    if sudo_ok && command -v apt-get >/dev/null; then echo "Installing sshfs (lets Claude work in your folders directly)..."; $SUDO apt-get install -y sshfs >/dev/null 2>&1 || true; fi
+    command -v sshfs >/dev/null || echo "NOTE: sshfs is not installed: kolood works in ~/workspace on the server instead of in your folders (install: apt install sshfs)"
+  fi
+  [ -e /dev/fuse ] || echo "NOTE: /dev/fuse is missing on this server: kolood can't show your folders here (works in ~/workspace instead)"
+}
+unmount_local() {  # the user's home mounted for local mode
+  awk '$1 ~ /^remote:/ && $3 == "fuse.sshfs" {print $2}' /proc/mounts 2>/dev/null | while read -r p; do fusermount -u "$p" 2>/dev/null || fusermount3 -u "$p" 2>/dev/null || true; done
+}
+# Chrome on the user's computer for Claude (DevTools through the tunnel's port 9222), for every account
+chrome() {
+  case "${1:-status}" in on|off|status) ;; *) die "usage: kolood chrome on|off|status";; esac
+  if [ "$1" = on ] && ! command -v npx >/dev/null; then die "needs Node.js on the server first: apt install nodejs npm"; fi
+  python3 - "$1" "$HOME/.claude.json" "$ACCTDIR"/*/.claude.json <<'PY2'
+import json, os, sys
+mode, files = sys.argv[1], [f for f in sys.argv[2:] if "*" not in f]
+entry = {"command": "npx", "args": ["-y", "chrome-devtools-mcp@latest", "--browserUrl", "http://127.0.0.1:9222"]}
+on = False
+for f in files:
+    c = json.load(open(f)) if os.path.exists(f) else {}
+    s = c.setdefault("mcpServers", {})
+    if mode == "status":
+        on = on or "kolood-chrome" in s; continue
+    if mode == "on": s["kolood-chrome"] = entry
+    else: s.pop("kolood-chrome", None)
+    fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, json.dumps(c, indent=2).encode()); os.close(fd)
+print("chrome: " + (("on" if on else "off") if mode == "status" else mode))
+PY2
+  if [ "$1" = on ]; then echo "On your computer, start Chrome with:  --remote-debugging-port=9222 --user-data-dir=<a separate profile folder>   (new sessions can then use it)"; fi
+}
+
 # ---------------------------------------------------------------- phone web terminal (server)
 fetch() { curl -fsSL --retry 2 -m 120 "$1" -o "$2.tmp" && mv "$2.tmp" "$2"; }
 webcfg() {  # webcfg key=value ... (empty value deletes the key) on ~/.config/kolood/web.json
@@ -489,7 +564,7 @@ web_install() {  # files, password, self-signed HTTPS for access by IP, service
   command -v python3 >/dev/null || { echo "web: python3 is missing (apt install python3)"; return 1; }
   mkdir -p "$WEB/static" ~/.config/kolood; chmod 700 ~/.config/kolood
   src=$(cd "$(dirname "$0")" 2>/dev/null && pwd)/web
-  for f in kolood_web.py index.html; do
+  for f in kolood_web.py index.html kolood_device.py; do
     if [ -f "$src/$f" ] && ! [ "$src/$f" -ef "$WEB/$f" ]; then cp "$src/$f" "$WEB/$f"
     else fetch "${URL%/install.sh}/web/$f" "$WEB/$f" || [ -f "$WEB/$f" ] || { echo "web: could not download $f"; return 1; }; fi
   done
@@ -703,6 +778,7 @@ One-liners (no questions asked):
   kolood -c                   continue the last session of this folder (local ones are copied first)
   kolood --resume [ID]        resume: pick from a list, or that session ID (copied from here if local)
   kolood shell                a login shell on the server
+  kolood chrome on|off        let Claude drive Chrome on this computer (needs Node.js on the server)
   kolood sessions             running sessions on the server (also visible on the phone page)
   kolood attach [ID]          join a running session (pick from a list without ID)
   kolood web [status | password [PW] | domain NAME | domain off | restart]   the phone page
@@ -711,13 +787,14 @@ One-liners (no questions asked):
 Flags (combine with start / -c / --resume; any other flag also starts Claude directly):
   --account NAME              use that Claude account on the server
   --no-remote                 this session is not told about your computer
+  --server                    work in ~/workspace on the server instead of in this folder
   -h, --help                  this help, then Claude's own options
 HELP
     [ "$1" = help ] && exit 0
     echo "--- Claude Code options (pass them after 'kolood start'; they run on the server) ---";;
   start|claude) shift;;
   shell|--shell) shift; set -- --shell "$@";;
-  account|web|sessions|attach) ;;
+  account|web|sessions|attach|chrome) ;;
   -*) ;;
   *) echo "kolood: unknown command '$1'. See: kolood -h   (to start Claude with a prompt: kolood start \"$1\")" >&2; exit 2;;
 esac
@@ -734,7 +811,7 @@ if [ "${1:-}" = account ] && { [ "${2:-}" = token ] || [ "${2:-}" = apikey ]; } 
 fi
 O=(-t "${O[@]}")
 case "${1:-}" in
-  account|web) exec ssh "${O[@]}" "bash ~/.local/share/kolood/install.sh$(printf ' %q' "$@")";;
+  account|web|chrome) exec ssh "${O[@]}" "bash ~/.local/share/kolood/install.sh$(printf ' %q' "$@")";;
   sessions) exec ssh "${O[@]}" "$WP list";;
   attach) id=${2:-}
     if [ -z "$id" ]; then   # pick one
@@ -814,6 +891,7 @@ remove() {
   for f in ~/.zshrc ~/.bash_profile ~/.bashrc ~/.profile; do if [ -f "$f" ]; then "${GNUSED[@]}" "/$MARK/d" "$f"; fi; done
   if [ -f ~/.local/bin/kolood ] && grep -qF "$MARK" ~/.local/bin/kolood; then rm -f ~/.local/bin/kolood; fi
   if [ -f ~/.claude/settings.json ] && command -v python3 >/dev/null; then allow off >/dev/null 2>&1 || true; fi
+  unmount_local
   ssh -O exit remote 2>/dev/null || true
   fusermount -u ~/remote 2>/dev/null || true; rmdir ~/remote ~/workspace 2>/dev/null || true
   if [ -f ~/.ssh/authorized_keys ]; then "${GNUSED[@]}" -e "/$MARK/d" -e "/# kolood-login/d" ~/.ssh/authorized_keys; fi
@@ -922,6 +1000,7 @@ case "${1:-}" in
   allow) allow "${2:-on}";;
   account) shift; account "$@";;
   web) shift; web "$@";;
+  chrome) chrome "${2:-status}";;
   update) update;;
   remove|uninstall|--uninstall) remove;;
   *kolood1.*) client "$1";;

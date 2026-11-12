@@ -1229,19 +1229,22 @@ class Daemon:
 
     # ---- api
 
-    def sessions_payload(self):
-        running = sorted(
-            ({'id': s.id, 'title': s.title, 'kind': s.kind, 'started': s.started,
-              'clients': len(s.clients)} for s in self.mgr.sessions.values()),
-            key=lambda s: s['started'])
+    def account_list(self):
         accounts = ['default']
         base = os.path.expanduser('~/.config/kolood/accounts')
         try:
             accounts += sorted(d for d in os.listdir(base) if os.path.isdir(os.path.join(base, d)))
         except OSError:
             pass
-        return {'running': running, 'recent': self.collect_recent(accounts),
-                'accounts': accounts}
+        return accounts
+
+    def sessions_payload(self):
+        running = sorted(
+            ({'id': s.id, 'title': s.title, 'kind': s.kind, 'started': s.started,
+              'clients': len(s.clients)} for s in self.mgr.sessions.values()),
+            key=lambda s: s['started'])
+        return {'running': running, 'recent': self.collect_recent(self.account_list()),
+                'accounts': self.account_list()}
 
     def collect_recent(self, accounts):
         cfgdirs = [('default', os.path.expanduser('~/.claude/projects'))]
@@ -1357,6 +1360,19 @@ class Daemon:
             return await self.respond(writer, 400, {'error': str(e)})
         cwd = os.path.expanduser('~/workspace')
         os.makedirs(cwd, exist_ok=True)
+        if kind == 'claude' and resume:
+            # resume in the folder the conversation ran in (it is on the device
+            # mount, so isdir() here means it exists on the server too)
+            for item in self.collect_recent(self.account_list()):
+                if item['id'] != resume:
+                    continue
+                c = item.get('cwd') or ''
+                if c.startswith('/') and len(cmd) > 1 and cmd[1] == '':
+                    # the b64 cwd arg for kolood_start: it mounts the user's folder if needed and works there
+                    cmd[1] = base64.b64encode(c.encode()).decode()
+                if os.path.isdir(c):
+                    cwd = c
+                break
         env = dict(os.environ)
         env['KOLOOD_INSIDE'] = '1'
         env['TERM'] = 'xterm-256color'
