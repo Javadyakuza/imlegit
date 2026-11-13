@@ -315,9 +315,17 @@ pull() {
   esac
   cfg=${KOLOOD_REMOTE_CONFIG:-.claude}; [[ "$cfg" =~ ^[A-Za-z0-9._/-]+$ ]] || die "bad KOLOOD_REMOTE_CONFIG"
   mkdir -p "$dst"; d="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(enc "$(cd "$dst" && pwd -P)")"; mkdir -p "$d"
+  # whole folder: send only what is new or changed (the history can be hundreds of MB; tar re-sent all of it on every -r)
+  if [ "$mode" = dir ] && command -v rsync >/dev/null && ssh -n -o BatchMode=yes -o ConnectTimeout=5 remote 'command -v rsync >/dev/null' 2>/dev/null; then
+    set +e
+    rsync -rtu --partial -e "ssh -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3" "remote:$cfg/projects/$arg/" "$d/" 2>/dev/null
+    r=$?; set -e
+    case $r in 0) echo "kolood: copied Claude session(s) from your computer";; *) echo "kolood: could not copy sessions from your computer (offline, or none for this folder); using the server's";; esac
+    return 0
+  fi
   K=""; tar --help 2>&1 | grep -q keep-newer-files && K=--keep-newer-files   # a session continued here stays
   set +e
-  timeout 120 ssh -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 remote sh -s -- "$mode" "$arg" "$cfg" <<'R' | tar -xf - -C "$d" $K 2>/dev/null
+  ssh -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 remote sh -s -- "$mode" "$arg" "$cfg" <<'R' | tar -xf - -C "$d" $K 2>/dev/null
 export COPYFILE_DISABLE=1
 cd "$HOME" && cd "$3/projects" 2>/dev/null || exit 3
 if [ "$1" = id ]; then
